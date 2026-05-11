@@ -1,0 +1,47 @@
+#compdef git-lm git-light-merge
+
+_git_lm() {
+    local context state state_descr line
+    typeset -A opt_args
+
+    _arguments -C \
+        '1: :->command' \
+        '*: :->args'
+
+    case $state in
+        command)
+            local commands; commands=(
+                'add:Add a feature and re-merge'
+                'rm:Remove a feature and re-merge'
+                'status:Show current light-merge status'
+                'continue:Resume merge loop after resolving conflicts'
+                'abort:Stop and delete current light-merge branch'
+                'rebase:Update base branch and rebuild'
+                'push:Push to remote (delete first)'
+                'prune:Cleanup old state files'
+                'help:Show help information'
+            )
+            _describe -t commands 'git lm commands' commands
+            ;;
+        args)
+            case $line[1] in
+                add|rm|--base)
+                    _git_branches
+                    ;;
+                *)
+                    if [[ $line[1] != -* ]]; then
+                        _git_branches
+                    fi
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_git_branches() {
+    local -a branches
+    branches=(${(f)"$(git branch --format='%(refname:short)')"})
+    _describe -t branches 'git branches' branches
+}
+
+_git_lm "$@"

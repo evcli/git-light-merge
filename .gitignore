@@ -1,0 +1,5 @@
+# Temporary worktrees (though git-light-merge handles them)
+.git-light-merge-worktrees/
+
+# OS files
+.DS_Store
