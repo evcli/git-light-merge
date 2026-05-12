@@ -1,68 +1,118 @@
-# git-light-merge (git lm)
+# Git Light Merge (git lm)
 
-A professional Git CLI tool to automate and atomize merging multiple feature branches into a single, clean light-merge branch.
+A powerful and lightweight Git automation tool designed to integrate multiple feature branches into a temporary integration branch (light-merge) with a single command.
 
-## Key Features
+## 🚀 Key Features
 
-- **Single Squash Commit**: Maintains only one commit relative to the base branch. All feature merge history is squashed for a clean integration view.
-- **Resumable Workflow (`continue`)**: If conflicts occur, resolve them and resume exactly where you left off. No need to restart the entire process.
-- **Stateful Management**: Remembers which branches are merged. Easily `add` or `rm` features and let the tool rebuild the branch for you.
-- **Interactive Picker (`pick`)**: Select branches using a fuzzy finder (`fzf`) or a native numbered list (no dependencies required).
-- **Cross-Platform**: Fully compatible with **macOS** and **Windows Git Bash**.
-- **On-demand Sync**: `rebase` command automatically fetches the latest base branch and rebuilds everything.
-- **Smart Pushing**: `push` command bypasses force-push restrictions by performing a delete-then-push sequence.
+- **One-Command Integration**: Merge multiple branches into a target branch with automatic squashing.
+- **State Persistence**: Automatically saves progress when conflicts occur; resume using `git lm continue`.
+- **Multi-Task Support**: Manage multiple different integration tasks simultaneously.
+- **Auto-Sync (Refresh)**: Fetch the latest base and features from origin and rebuild the integration environment in one click.
+- **Smart Completion**: Comprehensive Zsh and Bash completions for subcommands and branch names.
+- **Cross-Platform**: Seamlessly works on macOS (Zsh/Bash) and Windows (Git Bash).
 
 ---
 
-## Installation
+## 📋 Prerequisites
 
-### 1. Run Install Script
-```bash
-bash install.sh
-```
-This script copies the tool to your local bin directory and configures the `git lm` alias.
+- **Git**: 2.0 or higher.
+- **fzf** (Optional but **Highly Recommended**): Required for the best interactive experience with `git lm pick`. 
+  - macOS: `brew install fzf`
+  - Windows: `choco install fzf` or download the binary from [GitHub](https://github.com/junegunn/fzf/releases).
+  - *Note: A native numbered list picker will be used as a fallback if `fzf` is not found.*
 
-### 2. Setup Auto-completion (Highly Recommended)
+---
 
-#### For macOS (Zsh)
-Add the following to your `~/.zshrc`:
+## 🛠️ Installation
+
+### 1. macOS (Using Zsh Plugin Managers)
+
+We recommend using **Zinit** or other plugin managers for a zero-configuration experience:
+
 ```zsh
-fpath=(/path/to/git-light-merge/completions $fpath)
-autoload -Uz compinit && compinit
+# Add to your .zshrc
+zinit light evcli/git-light-merge
 ```
 
-#### For Windows / Git Bash (Bash)
-Add the following to your `~/.bashrc`:
-```bash
-source /path/to/git-light-merge/completions/git-lm.bash
+Or manually source it:
+```zsh
+# After cloning the repo, add to your .zshrc
+source /path/to/git-light-merge/git-light-merge.plugin.zsh
 ```
+
+### 2. Windows (Git Bash)
+
+Include the plugin in your `.bashrc` in the Git Bash environment:
+
+1.  Open Git Bash and edit or create `~/.bashrc`:
+    ```bash
+    notepad ~/.bashrc
+    ```
+2.  Add the following line:
+    ```bash
+    source /c/path/to/git-light-merge/git-light-merge.plugin.zsh
+    ```
+3.  Restart Git Bash or run `source ~/.bashrc`.
 
 ---
 
-## Command Reference
+## 🗑️ Uninstallation
 
-| Command | Description |
-| :--- | :--- |
-| `git lm <name> <f1> <f2>...` | Create a new light-merge branch and merge features. |
-| `git lm pick <name>` | Interactively pick features from a list. |
-| `git lm add <feature>` | Add a new feature to the current branch and rebuild. |
-| `git lm rm <feature>` | Remove a feature from the current branch and rebuild. |
-| `git lm continue` | Resume the merge loop after resolving conflicts. |
-| `git lm status` | Show current branch status and merged features. |
-| `git lm rebase` | Fetch latest base branch and rebuild the entire branch. |
-| `git lm push` | Push to remote (Safe delete + Push). |
-| `git lm abort` | Delete current light-merge branch and cleanup state. |
-| `git lm prune` | Cleanup old/orphaned state files. |
+To remove `git-light-merge`:
 
-### Options
-- `--base <branch>`: Specify a base branch (Default: `git default-branch` or `main`).
+1.  Remove the `source` or `zinit` line from your `.zshrc` or `.bashrc`.
+2.  (Optional) Unset the Git alias:
+    ```bash
+    git config --global --unset alias.lm
+    ```
+3.  Delete the repository folder.
 
 ---
 
-## Configuration
+## 📖 Usage
 
-You can customize the tool via environment variables or by editing the top of `bin/git-light-merge`:
+### Core Workflow
+- `git lm <name> <features...>` : Create and merge a new integration task.
+- `git lm add [feature] [name]` : Add a feature to a task. Use `.` for the **current branch**.
+- `git lm rm [feature] [name]` : Remove a feature from a task. Use `.` for the **current branch**.
+- `git lm status [name]` : Show the status and branches of a task.
+- `git lm refresh [name]` : Sync code from remote and rebuild a task (**Recommended**).
+
+> **💡 Pro Tip (Smart Selection)**: For commands like `status`, `refresh`, `add`, `push`, and `abort`, if you are not on a light-merge branch and don't provide a name, the tool will automatically select the target task if only one exists in your repo.
+
+### Task Management
+- `git lm list` (or `ls`) : List all local integration tasks.
+- `git lm clear` : Delete ALL local integration tasks and state files.
+- `git lm abort` : Stop and delete the current integration task.
+- `git lm push` : Push the integration results to the remote repository.
+
+### Utilities
+- `git lm pick <name>` : Interactively pick features from a branch list.
+- `git lm prune` : Clean up empty temporary state directories.
+
+---
+
+## ⚠️ Handling Conflicts
+
+When a conflict occurs during merging:
+
+1.  The script stops and saves the current progress.
+2.  Manually resolve the conflicts in the affected files.
+3.  Run `git add .`.
+4.  Run `git commit -m "fix conflict"` (the message will be squashed later).
+5.  Run **`git lm continue`** to resume the merging process.
+
+---
+
+## ⚙️ Configuration
+
+Customize the tool via environment variables:
 
 - `GIT_LM_USER`: User identifier for branch names (Default: system username).
-- `GIT_LM_TEMPLATE`: Branch naming template. Default: `light-merge/{user}-{name}`.
+- `GIT_LM_TEMPLATE`: Branch naming template (Default: `light-merge/{user}-{name}`).
 
+---
+
+## 🌟 Why Git Light Merge?
+
+Unlike manual merging, `git-light-merge` manages complex merge states in the background. Even when integrating 10+ branches, you can easily adjust your environment via `add`, `rm`, or `refresh` without worrying about human error or losing track of your progress.
