@@ -7,8 +7,7 @@ A powerful and lightweight Git automation tool designed to integrate multiple fe
 - **One-Command Integration**: Merge multiple branches into a target branch with automatic squashing.
 - **State Persistence**: Automatically saves progress when conflicts occur; resume using `git lm continue`.
 - **Multi-Task Support**: Manage multiple different integration tasks simultaneously.
-- **Auto-Sync (Refresh)**: Fetch the latest base and features from origin and rebuild the integration environment in one click.
-- **Smart Completion**: Comprehensive Zsh and Bash completions for subcommands and branch names.
+- **Auto-Sync (Refresh)**: Fetch the latest base and features from origin and rebuild the integration environment in one click. Supports changing base branch on the fly.
 - **Cross-Platform**: Seamlessly works on macOS (Zsh/Bash) and Windows (Git Bash).
 
 ---
@@ -60,11 +59,11 @@ Include the plugin in your `.bashrc` in the Git Bash environment:
 
 To remove `git-light-merge`:
 
-1.  Remove the `source` or `zinit` line from your `.zshrc` or `.bashrc`.
-2.  (Optional) Unset the Git alias:
+1.  Run the uninstaller script in the repository root:
     ```bash
-    git config --global --unset alias.lm
+    ./uninstall.sh
     ```
+2.  Remove the `source` or `zinit` line from your `.zshrc` or `.bashrc`.
 3.  Delete the repository folder.
 
 ---
@@ -72,23 +71,24 @@ To remove `git-light-merge`:
 ## 📖 Usage
 
 ### Core Workflow
-- `git lm <name> <features...>` : Create and merge a new integration task.
-- `git lm add [feature] [name]` : Add a feature to a task. Use `.` for the **current branch**.
-- `git lm rm [feature] [name]` : Remove a feature from a task. Use `.` for the **current branch**.
-- `git lm status [name]` : Show the status and branches of a task.
-- `git lm refresh [name]` : Sync code from remote and rebuild a task (**Recommended**).
+- `git lm create|new|mk <name> <features...> [--base branch]` : Create a new task.
+- `git lm add [feature] [name]` : Add a feature to a task. Use `.` for current branch.
+- `git lm rm [feature] [name]` : Remove a feature from a task.
+- `git lm status|st [name]` : Show the status and branches of a task.
+- `git lm refresh|rf [name] [--base branch]` : Sync code and rebuild. Supports changing base.
 
 > **💡 Pro Tip (Smart Selection)**: For commands like `status`, `refresh`, `add`, `push`, and `abort`, if you are not on a light-merge branch and don't provide a name, the tool will automatically select the target task if only one exists in your repo.
 
 ### Task Management
-- `git lm list` (or `ls`) : List all local integration tasks.
+- `git lm list|ls` : List all local integration tasks.
 - `git lm clear` : Delete ALL local integration tasks and state files.
 - `git lm abort` : Stop and delete the current integration task.
 - `git lm push` : Push the integration results to the remote repository.
 
 ### Utilities
-- `git lm pick <name>` : Interactively pick features from a branch list.
-- `git lm prune` : Clean up empty temporary state directories.
+- `git lm pick <name> [--base branch]` : Interactively pick features using `fzf`.
+- `git lm continue|con` : Resume the merging process after resolving conflicts.
+- `git lm prune` : Clean up orphaned temporary state directories.
 
 ---
 
@@ -100,7 +100,7 @@ When a conflict occurs during merging:
 2.  Manually resolve the conflicts in the affected files.
 3.  Run `git add .`.
 4.  Run `git commit -m "fix conflict"` (the message will be squashed later).
-5.  Run **`git lm continue`** to resume the merging process.
+5.  Run **`git lm continue`** (or `git lm con`) to resume the merging process.
 
 ---
 
