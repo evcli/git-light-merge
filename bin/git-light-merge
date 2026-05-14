@@ -402,9 +402,9 @@ list_cmd() {
         if load_state "$b" >/dev/null 2>&1; then
             # Color the branch name if it's current
             if [[ "$b" == "$current" ]]; then
-                printf "\e[32m%s%-30s\e[0m (%s)\n" "$prefix" "$b" "${LM_FEATURES[*]}"
+                printf "\e[32m%s%-30s\e[0m [%s] (%s)\n" "$prefix" "$b" "$LM_BASE" "${LM_FEATURES[*]}"
             else
-                printf "%s%-30s (%s)\n" "$prefix" "$b" "${LM_FEATURES[*]}"
+                printf "%s%-30s [%s] (%s)\n" "$prefix" "$b" "$LM_BASE" "${LM_FEATURES[*]}"
             fi
         else
             printf "%s%-30s\n" "$prefix" "$b"
