@@ -15,21 +15,13 @@ _LM_SCRIPT_EXEC="${_LM_PLUGIN_DIR}/bin/git-light-merge"
 
 # Ensure the script is executable
 if [[ -f "$_LM_SCRIPT_EXEC" ]]; then
-    chmod +x "$_LM_SCRIPT_EXEC"
+    # Only chmod if not executable to save time
+    [[ -x "$_LM_SCRIPT_EXEC" ]] || chmod +x "$_LM_SCRIPT_EXEC"
     
-    # Configure git alias to point to the absolute path
-    # We use '!' to tell git it's an external command
-    git config --global alias.lm "!${_LM_SCRIPT_EXEC}"
-fi
-
-# Load completions
-if [[ -n "$ZSH_VERSION" ]]; then
-    # For Zsh, add to fpath. Zinit or compinit will handle the rest.
-    fpath=("${_LM_PLUGIN_DIR}/completions" $fpath)
-elif [[ -n "$BASH_VERSION" ]]; then
-    # For Bash (including Git Bash on Windows), source the script directly.
-    if [[ -f "${_LM_PLUGIN_DIR}/completions/git-lm.bash" ]]; then
-        source "${_LM_PLUGIN_DIR}/completions/git-lm.bash"
+    # Only update git config if it's missing or points to a different location
+    # This significantly speeds up shell startup
+    if [[ "$(git config --global alias.lm 2>/dev/null)" != "!${_LM_SCRIPT_EXEC}" ]]; then
+        git config --global alias.lm "!${_LM_SCRIPT_EXEC}"
     fi
 fi
 
