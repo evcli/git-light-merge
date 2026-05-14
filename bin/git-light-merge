@@ -23,15 +23,15 @@ show_help() {
 Usage: git lm [command] [options]
 
 Commands:
-  git lm <name> <features...> [--base branch]  Create and merge light-merge branch
+  git lm create|new|mk <name> <features...>    Create and merge light-merge branch
   git lm pick [name] [--base branch]           Interactively pick features
   git lm add [feature] [name]                  Add feature to task ('.' for current branch)
   git lm rm [feature] [name]                   Remove feature from task ('.' for current)
-  git lm status [name]                         Show status (auto-selects if unique)
-  git lm refresh [name] [--base branch]        Update base/features and rebuild task
-  git lm list                                  List all light-merge tasks (ls)
+  git lm status|st [name]                      Show status (auto-selects if unique)
+  git lm refresh|rf [name] [--base branch]     Update base/features and rebuild task
+  git lm list|ls                               List all light-merge tasks
   git lm push [name]                           Push to remote
-  git lm continue                              Continue after resolving conflicts
+  git lm continue|con                          Continue after resolving conflicts
   git lm abort [name]                          Stop and delete a task
   git lm clear                                 Delete ALL light-merge tasks
   git lm prune                                 Cleanup old state files
@@ -445,6 +445,47 @@ clear_cmd() {
     log_info "All light-merge tasks cleared."
 }
 
+create_cmd() {
+    local base=""
+    local args=()
+    while [[ $# -gt 0 ]]; do
+        if [[ "$1" == "--base" ]]; then
+            base="$2"; shift 2
+        else
+            args+=("$1"); shift
+        fi
+    done
+
+    if [[ ${#args[@]} -lt 1 ]]; then show_help; exit 1; fi
+    local name="${args[0]}"
+    local features=()
+    if [[ ${#args[@]} -gt 1 ]]; then
+        for ((i=1; i<${#args[@]}; i++)); do
+            features+=("${args[$i]}")
+        done
+    fi
+
+    if [[ -z "$base" ]]; then
+        # Try to load existing state to reuse the base branch
+        local full_name=$(resolve_lm_branch "$name")
+        if load_state "$full_name" >/dev/null 2>&1; then
+            base="$LM_BASE"
+            log_info "Reusing existing base: $base"
+        else
+            base=$(git default-branch 2>/dev/null || git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo "main")
+        fi
+    fi
+    
+    if [[ ${#features[@]} -eq 0 && "$name" != "--help" && "$name" != "-h" ]]; then
+        # If only name is provided, it might be an attempt to use 'git lm <name>' 
+        # but the user didn't provide features. However, do_merge requires features.
+        show_help
+        exit 1
+    fi
+
+    do_merge "$name" "$base" ${features[@]+"${features[@]}"}
+}
+
 list_cmd() {
     local branches=$(git branch --list "${LM_PREFIX}*" --format='%(refname:short)')
     if [[ -z "$branches" ]]; then
@@ -502,7 +543,7 @@ add_cmd() {
         if [[ "$f" == "$feature" ]]; then
             log_info "Feature $feature is already in $full_name. Refreshing..."
             local name="${full_name#$LM_PREFIX}"; name="${name#$LM_USER-}"
-            do_merge "$name" "$LM_BASE" "${LM_FEATURES[@]}"
+            do_merge "$name" "$LM_BASE" ${LM_FEATURES[@]+"${LM_FEATURES[@]}"}
             return
         fi
     done
@@ -561,16 +602,17 @@ main() {
     [[ $# -eq 0 ]] && { show_help; exit 0; }
 
     case "$1" in
+        create|new|mk) shift; create_cmd "$@" ;;
         add) shift; add_cmd "$@" ;;
         rm)  shift; rm_cmd "$@" ;;
-        status) shift; status_cmd "$@" ;;
+        status|st) shift; status_cmd "$@" ;;
         list|ls) list_cmd ;;
         abort)
             shift
             local target_task="${1:-}"
             abort_cmd "$target_task"
             ;;
-        continue) continue_cmd ;;
+        continue|con) continue_cmd ;;
         push)
             local b=$(find_target_lm "${2:-}") || exit 1
             log_info "Pushing $b to origin..."
@@ -595,43 +637,7 @@ main() {
             ;;
         prune) prune_cmd ;;
         help|--help|-h) show_help ;;
-        *)
-            local base=""
-            local args=()
-            while [[ $# -gt 0 ]]; do
-                if [[ "$1" == "--base" ]]; then
-                    base="$2"; shift 2
-                else
-                    args+=("$1"); shift
-                fi
-            done
-
-            if [[ ${#args[@]} -lt 1 ]]; then show_help; exit 1; fi
-            local name="${args[0]}"
-            local features=(${args[@]:1})
-
-            if [[ -z "$base" ]]; then
-                # Try to load existing state to reuse the base branch
-                local full_name=$(resolve_lm_branch "$name")
-                if load_state "$full_name" >/dev/null 2>&1; then
-                    base="$LM_BASE"
-                    log_info "Reusing existing base: $base"
-                else
-                    base=$(git default-branch 2>/dev/null || git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo "main")
-                fi
-            fi
-            
-            if [[ ${#features[@]} -eq 0 && "$name" != "--help" && "$name" != "-h" ]]; then
-                # If only name is provided, it might be an attempt to use 'git lm <name>' 
-                # but the user didn't provide features. However, do_merge requires features.
-                # If the user intended to show status, they should use 'status'.
-                # But let's check if the name is actually a command we missed.
-                show_help
-                exit 1
-            fi
-
-            do_merge "$name" "$base" ${features[@]+"${features[@]}"}
-            ;;
+        *) create_cmd "$@" ;;
     esac
 }
 
