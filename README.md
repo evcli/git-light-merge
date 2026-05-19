@@ -15,10 +15,8 @@ A powerful and lightweight Git automation tool designed to integrate multiple fe
 ## 📋 Prerequisites
 
 - **Git**: 2.0 or higher.
-- **fzf** (Optional but **Highly Recommended**): Required for the best interactive experience with `git lm pick`. 
-  - macOS: `brew install fzf`
-  - Windows: `choco install fzf` or download the binary from [GitHub](https://github.com/junegunn/fzf/releases).
-  - *Note: A native numbered list picker will be used as a fallback if `fzf` is not found.*
+- **Interactive TUI Support** (Built-in!): An interactive selection menu is built-in (`git-lm-picker`) for selecting tasks and features seamlessly.
+  - *Note: A native numbered list picker will be used as a fallback if the picker plugin is not found or executed in a non-interactive shell.*
 
 ---
 
@@ -86,7 +84,7 @@ To remove `git-light-merge`:
 - `git lm push` : Push the integration results to the remote repository.
 
 ### Utilities
-- `git lm pick <name> [--base branch]` : Interactively pick features using `fzf`.
+- `git lm pick <name> [--base branch]` : Interactively pick features using a beautiful TUI selection menu.
 - `git lm continue|con` : Resume the merging process after resolving conflicts.
 - `git lm prune` : Clean up orphaned temporary state directories.
 

@@ -1,0 +1,338 @@
+#!/usr/bin/env bash
+#
+# git-lm-picker (Pure Bash Interactive Multi-Select Picker)
+# Compatible with macOS Terminal (Bash 3.2+) and Windows Git Bash.
+# Zero external binary dependencies.
+#
+# Usage:
+#   echo -e "branch1\nbranch2" | git-lm-picker --header "Select branches:"
+#
+
+set -euo pipefail
+
+# Parse command line arguments
+header_prompt="Select items:"
+selected_input=""
+single_mode="false"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --header)
+            header_prompt="$2"
+            shift 2
+            ;;
+        --selected)
+            selected_input="$2"
+            shift 2
+            ;;
+        --single)
+            single_mode="true"
+            shift
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+# 1. Read input list from standard input (stdin)
+branches=()
+while read -r line; do
+    # Only keep non-empty lines
+    [[ -n "$line" ]] && branches+=("$line")
+done
+
+# If there are no items to select, exit immediately
+if [[ ${#branches[@]} -eq 0 ]]; then
+    exit 0
+fi
+
+# Save original stdout (FD 1) to FD 3, and redirect stdout to stderr (FD 2)
+# This ensures the interactive TUI is drawn to the terminal even when stdout is captured
+exec 3>&1
+exec 1>&2
+
+# 2. Redirect stdin to the terminal (/dev/tty) for keyboard input
+exec < /dev/tty
+
+# State variables
+filter=""
+filtered_indices=()
+selected_indices=()
+
+# Pre-populate selected_indices if --selected is provided
+if [[ -n "$selected_input" ]]; then
+    # Split selected_input by comma safely (Bash 3.2+ compatible)
+    IFS=',' read -r -a pre_selected <<< "$selected_input"
+    for i in "${!branches[@]}"; do
+        # Extract the branch name (everything before the first space)
+        item="${branches[i]}"
+        b_name="${item%% *}"
+        
+        # Check if b_name exists in pre_selected list
+        for ps in ${pre_selected[@]+"${pre_selected[@]}"}; do
+            if [[ "$b_name" == "$ps" ]]; then
+                selected_indices+=("$i")
+                break
+            fi
+        done
+    done
+fi
+cursor_idx=0
+scroll_top=0
+lines_drawn=0
+
+# Core filter function
+filter_items() {
+    local query="$1"
+    filtered_indices=()
+    
+    # Save and set case-insensitive glob/regex matching (fully compatible with Bash 3.2+)
+    local orig_nocasematch
+    orig_nocasematch=$(shopt -p nocasematch 2>/dev/null || echo "")
+    shopt -s nocasematch
+    
+    for i in "${!branches[@]}"; do
+        local item="${branches[i]}"
+        if [[ -z "$query" || "$item" == *"$query"* ]]; then
+            filtered_indices+=("$i")
+        fi
+    done
+    
+    # Restore original case-match settings
+    if [[ -n "$orig_nocasematch" ]]; then
+        eval "$orig_nocasematch"
+    else
+        shopt -u nocasematch
+    fi
+}
+
+# Initial filter run
+filter_items ""
+
+# Keyboard Input Parser
+# Decodes special escape sequences like arrow keys reliably on both macOS and Git Bash.
+read_key() {
+    local key
+    if ! IFS= read -rsn1 key; then
+        echo "ENTER"
+        return
+    fi
+
+    if [[ "$key" == $'\e' ]]; then
+        local next_chars=""
+        # Read the next 2 characters of the escape sequence using a safe 1-second integer timeout.
+        # This returns INSTANTLY (0 delay) for arrow keys as the bytes arrive together.
+        if IFS= read -rsn2 -t 1 next_chars 2>/dev/null; then
+            case "$next_chars" in
+                '[A'|'OA') echo "UP" ;;
+                '[B'|'OB') echo "DOWN" ;;
+                *) echo "ESC" ;;
+            esac
+        else
+            echo "ESC"
+        fi
+    elif [[ "$key" == $'\x7f' || "$key" == $'\x08' ]]; then
+        echo "BACKSPACE"
+    elif [[ "$key" == $'\t' ]]; then
+        echo "TAB"
+    elif [[ -z "$key" ]]; then
+        echo "ENTER"
+    elif [[ "$key" == " " ]]; then
+        echo "SPACE"
+    else
+        echo "CHAR:$key"
+    fi
+}
+
+# Toggle selection status of the current item under the cursor
+toggle_selection() {
+    local real_idx=${filtered_indices[cursor_idx]}
+    local new_selected=()
+    local found=0
+    for idx in ${selected_indices[@]+"${selected_indices[@]}"}; do
+        if (( idx == real_idx )); then
+            found=1
+        else
+            new_selected+=("$idx")
+        fi
+    done
+    if (( found == 0 )); then
+        selected_indices+=("$real_idx")
+    else
+        selected_indices=()
+        for idx in ${new_selected[@]+"${new_selected[@]}"}; do
+            selected_indices+=("$idx")
+        done
+    fi
+}
+
+# Clean terminal state upon exit/abort
+cleanup() {
+    printf "\e[?25h" # Re-enable cursor
+    if (( lines_drawn > 0 )); then
+        # Move cursor back to the starting line and clear everything printed by the picker
+        printf "\e[%dA\e[J" "$lines_drawn"
+    fi
+}
+trap cleanup EXIT INT TERM
+
+# Hide the standard cursor during selection
+printf "\e[?25l"
+
+# Main Interactive Loop
+while true; do
+    # --- Redraw Viewport ---
+    if (( lines_drawn > 0 )); then
+        printf "\e[%dA" "$lines_drawn"
+    fi
+    lines_drawn=0
+
+    # Draw header & search field
+    printf "\e[K\e[36m%s\e[0m\n" "$header_prompt"
+    (( lines_drawn++ ))
+    
+    printf "\e[K\e[1mSearch: \e[0m\e[33m%s\e[0m\e[5m|\e[0m\n" "$filter"
+    (( lines_drawn++ ))
+
+    total_filtered=${#filtered_indices[@]}
+    if (( total_filtered == 0 )); then
+        printf "\e[K  \e[31mNo matching branches.\e[0m\n"
+        (( lines_drawn++ ))
+    else
+        # Viewport height limit (10 items max, auto-scrolls)
+        view_height=10
+        if (( view_height > total_filtered )); then
+            view_height=$total_filtered
+        fi
+
+        # Keep cursor bounded within matches
+        if (( cursor_idx < 0 )); then
+            cursor_idx=0
+        elif (( cursor_idx >= total_filtered )); then
+            cursor_idx=$((total_filtered - 1))
+        fi
+
+        # Auto-scroll viewport
+        if (( cursor_idx < scroll_top )); then
+            scroll_top=$cursor_idx
+        elif (( cursor_idx >= scroll_top + view_height )); then
+            scroll_top=$(( cursor_idx - view_height + 1 ))
+        fi
+
+        # Draw matching items in the viewport
+        for (( i=0; i<view_height; i++ )); do
+            idx=$(( scroll_top + i ))
+            real_idx=${filtered_indices[idx]}
+            item_text="${branches[real_idx]}"
+            
+            # Check if this item is selected
+            is_selected=0
+            for s_idx in ${selected_indices[@]+"${selected_indices[@]}"}; do
+                if (( s_idx == real_idx )); then
+                    is_selected=1
+                    break
+                fi
+            done
+
+            cursor_prefix="  "
+            if (( idx == cursor_idx )); then
+                cursor_prefix="\e[32m> \e[0m" # Green active pointer
+            fi
+
+            checkbox=""
+            if [[ "$single_mode" == "false" ]]; then
+                checkbox="[ ]"
+                if (( is_selected == 1 )); then
+                    checkbox="[\e[32mx\e[0m]" # Green x for selected
+                fi
+                checkbox="$checkbox " # add trailing space
+            fi
+
+            if (( idx == cursor_idx )); then
+                # Highlight active line in bold green
+                printf "\e[K%b%b\e[1;32m%s\e[0m\n" "$cursor_prefix" "$checkbox" "$item_text"
+            else
+                printf "\e[K%b%b%s\n" "$cursor_prefix" "$checkbox" "$item_text"
+            fi
+            (( lines_drawn++ ))
+        done
+
+        # Render helper text at the bottom
+        if [[ "$single_mode" == "true" ]]; then
+            if (( total_filtered > view_height )); then
+                printf "\e[K  \e[90m-- Match %d of %d (Use ↑/↓ to navigate, Enter to select, ESC/Ctrl+C to quit) --\e[0m\n" "$((cursor_idx + 1))" "$total_filtered"
+            else
+                printf "\e[K  \e[90m-- %d matches (Enter to select, ESC/Ctrl+C to quit) --\e[0m\n" "$total_filtered"
+            fi
+        else
+            if (( total_filtered > view_height )); then
+                printf "\e[K  \e[90m-- Match %d of %d (Use ↑/↓, Space/Tab to select, Enter to confirm, ESC/Ctrl+C to quit) --\e[0m\n" "$((cursor_idx + 1))" "$total_filtered"
+            else
+                printf "\e[K  \e[90m-- %d matches (Space/Tab to select, Enter to confirm, ESC/Ctrl+C to quit) --\e[0m\n" "$total_filtered"
+            fi
+        fi
+        (( lines_drawn++ ))
+    fi
+
+    # --- Read & Handle Key ---
+    action=$(read_key)
+    
+    case "$action" in
+        UP)
+            if (( cursor_idx > 0 )); then
+                (( cursor_idx-- ))
+            fi
+            ;;
+        DOWN)
+            if (( cursor_idx < total_filtered - 1 )); then
+                (( cursor_idx++ ))
+            fi
+            ;;
+        SPACE|TAB)
+            if [[ "$single_mode" == "true" ]]; then
+                if (( total_filtered > 0 )); then
+                    real_idx=${filtered_indices[cursor_idx]}
+                    selected_indices=("$real_idx")
+                    break
+                fi
+            else
+                if (( total_filtered > 0 )); then
+                    toggle_selection
+                fi
+            fi
+            ;;
+        BACKSPACE)
+            if [[ -n "$filter" ]]; then
+                filter="${filter%?}"
+                filter_items "$filter"
+                cursor_idx=0
+                scroll_top=0
+            fi
+            ;;
+        CHAR:*)
+            char="${action#CHAR:}"
+            filter="${filter}${char}"
+            filter_items "$filter"
+            cursor_idx=0
+            scroll_top=0
+            ;;
+        ENTER)
+            if [[ "$single_mode" == "true" ]]; then
+                if (( total_filtered > 0 )); then
+                    real_idx=${filtered_indices[cursor_idx]}
+                    selected_indices=("$real_idx")
+                fi
+            fi
+            break
+            ;;
+        ESC)
+            # Abort selection without outputting anything
+            exit 1
+            ;;
+    esac
+done
+
+# Output selected items to original stdout (FD 3)
+for idx in ${selected_indices[@]+"${selected_indices[@]}"}; do
+    echo "${branches[idx]}" >&3
+done

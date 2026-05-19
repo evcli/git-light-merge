@@ -13,6 +13,10 @@ LM_PREFIX="${LM_NAME_TEMPLATE%%\{*}"
 LM_GIT_DIR=$(git rev-parse --git-dir 2>/dev/null || echo ".git")
 LM_STATE_ROOT="$LM_GIT_DIR/light-merge"
 
+# Hot-pluggable interactive picker plugin path configuration
+LM_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GIT_LM_PICKER_PLUGIN="${GIT_LM_PICKER_PLUGIN:-"$LM_SCRIPT_DIR/git-lm-picker"}"
+
 # Color output functions
 log_info() { printf "\e[32m%b\e[0m\n" "$*" >&2; }
 log_warn() { printf "\e[33m%b\e[0m\n" "$*" >&2; }
@@ -99,28 +103,51 @@ resolve_lm_branch() {
 # Helper to find the target LM branch when not on one
 find_target_lm() {
     local input_name="${1:-}"
+    LM_RESOLVED_BRANCH=""
+    
     if [[ -n "$input_name" ]]; then
-        resolve_lm_branch "$input_name"
+        LM_RESOLVED_BRANCH=$(resolve_lm_branch "$input_name")
         return 0
     fi
     
     if is_lm_branch; then
-        get_current_branch
+        LM_RESOLVED_BRANCH=$(get_current_branch)
         return 0
     fi
     
     local branches=($(git branch --list "${LM_PREFIX}*" --format='%(refname:short)'))
     if [[ ${#branches[@]} -eq 1 ]]; then
         log_info "Auto-selecting task: ${branches[0]}"
-        echo "${branches[0]}"
+        LM_RESOLVED_BRANCH="${branches[0]}"
         return 0
     elif [[ ${#branches[@]} -gt 1 ]]; then
-        log_err "Error: Multiple tasks found. Please specify one:"
+        # Dynamically let the user pick one task interactively!
+        local task_list=""
         for b in "${branches[@]}"; do
             local n="${b#$LM_PREFIX}"
-            printf "  - %s\n" "${n#$LM_USER-}" >&2
+            local clean_name="${n#$LM_USER-}"
+            task_list="$task_list$clean_name"$'\n'
         done
-        return 1
+        
+        local choice=""
+        local exit_code=0
+        if [[ -x "$GIT_LM_PICKER_PLUGIN" ]]; then
+            choice=$(printf "%s" "$task_list" | "$GIT_LM_PICKER_PLUGIN" --header "Select light-merge task:" --single)
+            exit_code=$?
+        fi
+        
+        if [[ $exit_code -ne 0 ]]; then
+            log_warn "Aborted."
+            return 1
+        fi
+        
+        if [[ -n "$choice" ]]; then
+            LM_RESOLVED_BRANCH=$(resolve_lm_branch "$choice")
+            return 0
+        else
+            log_err "Error: No task selected."
+            return 1
+        fi
     else
         log_err "Error: No light-merge tasks found."
         return 1
@@ -231,7 +258,7 @@ run_merge_loop() {
     
     local msg_list=""
     for f in ${LM_FEATURES[@]+"${LM_FEATURES[@]}"}; do msg_list="$msg_list\n- $f"; done
-    printf "Integrated: $target_branch\n\nIncluded features:$msg_list" | git commit -F -
+    printf "Integrated: $target_branch\n\nIncluded features:$msg_list" | git commit --allow-empty -F -
     
     local feat_content=$(printf "%s\n" ${LM_FEATURES[@]+"${LM_FEATURES[@]}"})
     save_state "$target_branch" "$base" "$feat_content" ""
@@ -259,8 +286,9 @@ continue_cmd() {
 }
 
 status_cmd() {
-    local full_name
-    full_name=$(find_target_lm "${1:-}") || return 1
+    find_target_lm "${1:-}" || return 1
+
+    local full_name="$LM_RESOLVED_BRANCH"
 
     if load_state "$full_name"; then
         echo "Branch  : $full_name"
@@ -273,7 +301,8 @@ status_cmd() {
 }
 
 abort_cmd() {
-    local target_branch=$(find_target_lm "${1:-}") || return 1
+    find_target_lm "${1:-}" || return 1
+    local target_branch="$LM_RESOLVED_BRANCH"
     load_state "$target_branch" && {
         git checkout "$LM_BASE"
         git branch -D "$target_branch"
@@ -318,12 +347,34 @@ push_cmd() {
 
 pick_cmd() {
     local base="$1"; shift
+    local name=""
     if [[ $# -lt 1 ]]; then
-        log_err "Usage: git lm pick [--base branch] <name>"
-        exit 1
+        # Check if there are no existing light-merge tasks
+        local branches=($(git branch --list "${LM_PREFIX}*" --format='%(refname:short)'))
+        if [[ ${#branches[@]} -eq 0 ]]; then
+            log_err "Error: No existing light-merge tasks. To create a new one, please specify a name:"
+            log_err "Usage: git lm pick [--base branch] <name>"
+            exit 1
+        fi
+        
+        # Now call find_target_lm safely without any redirection so the TUI renders perfectly!
+        if ! find_target_lm ""; then
+            exit 1
+        fi
+        local resolved_branch="$LM_RESOLVED_BRANCH"
+        
+        # Extract the clean name from the resolved full branch name (e.g. light-merge/evan-test -> test)
+        local suffix="${resolved_branch#$LM_PREFIX}"
+        local user_prefix="${LM_NAME_TEMPLATE#$LM_PREFIX}"
+        user_prefix="${user_prefix%%\{name\}*}"
+        user_prefix="${user_prefix//\{user\}/$LM_USER}"
+        name="${suffix#$user_prefix}"
+    else
+        name=$1
     fi
-    local name=$1
+    
     local selected_features=()
+    local LM_FEATURES=()
 
     # Resolve base branch first
     if [[ -z "$base" ]]; then
@@ -338,11 +389,12 @@ pick_cmd() {
     fi
 
     # Get branches sorted by committerdate, with local/remote categorization and base excluded
-    local branch_list=$(git branch -a --sort=-committerdate --format='%(refname) %(refname:short)' | awk -v base="$base" '
+    local branch_list=$(git branch -a --sort=-committerdate --format='%(refname) %(refname:short)' | awk -v base="$base" -v prefix="$LM_PREFIX" '
         $1 ~ /\/HEAD$/ { next }
         $1 ~ /^refs\/heads\// {
             branch = $2
             if (branch == base) next
+            if (index(branch, prefix) == 1) next
             is_local[branch] = 1
             if (!seen[branch]) {
                 seen[branch] = 1
@@ -354,6 +406,7 @@ pick_cmd() {
             if (idx > 0) {
                 branch = substr($2, idx + 1)
                 if (branch == base) next
+                if (index(branch, prefix) == 1) next
                 if (branch != "" && branch != "HEAD") {
                     is_remote[branch] = 1
                     if (!seen[branch]) {
@@ -377,19 +430,26 @@ pick_cmd() {
         }
     ')
 
-    if command -v fzf >/dev/null 2>&1; then
-        log_info "Picking features using fzf (TAB to multi-select, ENTER to confirm, ESC to quit)..."
-        local selected=$(echo "$branch_list" | fzf -m --header="Base branch: $base | Select branches (TAB to multi-select, ESC to quit)")
-        if [[ -z "$selected" ]]; then log_warn "Aborted."; exit 0; fi
+    if [[ -x "$GIT_LM_PICKER_PLUGIN" ]]; then
+        log_info "Using interactive Bash picker plugin..."
+        local selected
+        local existing_features=""
+        if [[ ${#LM_FEATURES[@]} -gt 0 ]]; then
+            # Join array elements by comma safely under set -u
+            existing_features=$(IFS=,; echo "${LM_FEATURES[*]}")
+        fi
+        if ! selected=$(echo "$branch_list" | "$GIT_LM_PICKER_PLUGIN" --header "Base branch: $base | Select branches (Space/Tab to select, Enter to confirm)" --selected "$existing_features"); then
+            log_warn "Aborted."
+            exit 0
+        fi
         
-        # Correctly capture multi-line output into array
         while read -r line; do
             if [[ -n "$line" ]]; then
                 selected_features+=("${line%% *}")
             fi
         done <<< "$selected"
     else
-        log_info "fzf not found. Using native numbered list picker..."
+        log_info "Using native numbered list picker..."
         local annotated_branches=()
         while read -r line; do
             [[ -n "$line" ]] && annotated_branches+=("$line")
@@ -409,7 +469,7 @@ pick_cmd() {
 
         if [[ $total -gt $limit ]]; then
             log_warn "  ... showing first $limit of $total branches (sorted by recency)."
-            log_info "  Tip: Install 'fzf' for a fully searchable interactive picker of all branches."
+            log_info "  Tip: Configure 'git-lm-picker' plugin for a fully searchable interactive picker."
         fi
 
         printf "\nEnter branch numbers to merge (e.g., 1 3 5), or 'q' to quit: "
@@ -443,8 +503,8 @@ refresh_cmd() {
         fi
     done
 
-    local full_name
-    full_name=$(find_target_lm "${args[0]:-}") || return 1
+    find_target_lm "${args[0]:-}" || return 1
+    local full_name="$LM_RESOLVED_BRANCH"
     load_state "$full_name" || { log_err "Error: No state found for $full_name"; exit 1; }
     
     [[ -n "$base" ]] && LM_BASE="$base"
@@ -588,8 +648,8 @@ add_cmd() {
     fi
     
     # 2. Resolve target task
-    local full_name
-    full_name=$(find_target_lm "$target_task") || return 1
+    find_target_lm "$target_task" || return 1
+    local full_name="$LM_RESOLVED_BRANCH"
     
     # 3. Load state and check if already exists
     load_state "$full_name" || { log_err "Error: No state found for $full_name"; return 1; }
@@ -625,8 +685,8 @@ rm_cmd() {
     fi
     
     # 2. Resolve target task
-    local full_name
-    full_name=$(find_target_lm "$target_task") || return 1
+    find_target_lm "$target_task" || return 1
+    local full_name="$LM_RESOLVED_BRANCH"
     
     # 3. Load state and filter
     load_state "$full_name" || { log_err "Error: No state found for $full_name"; return 1; }
@@ -674,7 +734,8 @@ main() {
             ;;
         continue|con) continue_cmd ;;
         push)
-            local b=$(find_target_lm "${2:-}") || exit 1
+            find_target_lm "${2:-}" || exit 1
+            local b="$LM_RESOLVED_BRANCH"
             log_info "Pushing $b to origin..."
             git push origin --delete "$b" 2>/dev/null || true
             git checkout "$b" 2>/dev/null
