@@ -325,40 +325,7 @@ pick_cmd() {
     local name=$1
     local selected_features=()
 
-    # Get both local and remote branches (excluding HEAD and current branch)
-    local branch_list=$(git branch -a --format='%(refname:short)' | sed 's|^origin/||' | sort -u | grep -v "HEAD")
-
-    if command -v fzf >/dev/null 2>&1; then
-        log_info "Picking features using fzf (TAB to multi-select, ENTER to confirm)..."
-        local selected=$(echo "$branch_list" | fzf -m --header="Select branches to merge into '$name'")
-        if [[ -z "$selected" ]]; then log_warn "Aborted."; exit 0; fi
-        
-        # Correctly capture multi-line output into array
-        while read -r line; do
-            [[ -n "$line" ]] && selected_features+=("$line")
-        done <<< "$selected"
-    else
-        log_info "fzf not found. Using native numbered list picker..."
-        local branches=($branch_list)
-        for i in "${!branches[@]}"; do
-            printf "  [%2d] %s\n" "$((i+1))" "${branches[$i]}"
-        done
-        printf "\nEnter branch numbers to merge (e.g., 1 3 5), or 'q' to quit: "
-        read -r input
-        if [[ "$input" == "q" ]]; then exit 0; fi
-        for idx in $input; do
-            if [[ "$idx" -gt 0 && "$idx" -le "${#branches[@]}" ]]; then
-                selected_features+=("${branches[$((idx-1))]}")
-            fi
-        done
-    fi
-
-    if [[ ${#selected_features[@]} -eq 0 ]]; then
-        log_warn "No features selected. Aborting."
-        exit 0
-    fi
-
-    log_info "Selected features: ${selected_features[*]}"
+    # Resolve base branch first
     if [[ -z "$base" ]]; then
         # Try to load existing state to reuse the base branch
         local full_name=$(resolve_lm_branch "$name")
@@ -369,6 +336,99 @@ pick_cmd() {
             base=$(git default-branch 2>/dev/null || git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo "main")
         fi
     fi
+
+    # Get branches sorted by committerdate, with local/remote categorization and base excluded
+    local branch_list=$(git branch -a --sort=-committerdate --format='%(refname) %(refname:short)' | awk -v base="$base" '
+        $1 ~ /\/HEAD$/ { next }
+        $1 ~ /^refs\/heads\// {
+            branch = $2
+            if (branch == base) next
+            is_local[branch] = 1
+            if (!seen[branch]) {
+                seen[branch] = 1
+                order[++count] = branch
+            }
+        }
+        $1 ~ /^refs\/remotes\// {
+            idx = index($2, "/")
+            if (idx > 0) {
+                branch = substr($2, idx + 1)
+                if (branch == base) next
+                if (branch != "" && branch != "HEAD") {
+                    is_remote[branch] = 1
+                    if (!seen[branch]) {
+                        seen[branch] = 1
+                        order[++count] = branch
+                    }
+                }
+            }
+        }
+        END {
+            for (i = 1; i <= count; i++) {
+                b = order[i]
+                if (is_local[b] && is_remote[b]) {
+                    print b " [local & remote]"
+                } else if (is_local[b]) {
+                    print b " [local only]"
+                } else if (is_remote[b]) {
+                    print b " [remote only]"
+                }
+            }
+        }
+    ')
+
+    if command -v fzf >/dev/null 2>&1; then
+        log_info "Picking features using fzf (TAB to multi-select, ENTER to confirm, ESC to quit)..."
+        local selected=$(echo "$branch_list" | fzf -m --header="Base branch: $base | Select branches (TAB to multi-select, ESC to quit)")
+        if [[ -z "$selected" ]]; then log_warn "Aborted."; exit 0; fi
+        
+        # Correctly capture multi-line output into array
+        while read -r line; do
+            if [[ -n "$line" ]]; then
+                selected_features+=("${line%% *}")
+            fi
+        done <<< "$selected"
+    else
+        log_info "fzf not found. Using native numbered list picker..."
+        local annotated_branches=()
+        while read -r line; do
+            [[ -n "$line" ]] && annotated_branches+=("$line")
+        done <<< "$branch_list"
+
+        local limit=30
+        local total=${#annotated_branches[@]}
+        local count=$total
+        if [[ $count -gt $limit ]]; then
+            count=$limit
+        fi
+
+        log_info "Base branch: $base"
+        for ((i=0; i<count; i++)); do
+            printf "  [%2d] %s\n" "$((i+1))" "${annotated_branches[$i]}"
+        done
+
+        if [[ $total -gt $limit ]]; then
+            log_warn "  ... showing first $limit of $total branches (sorted by recency)."
+            log_info "  Tip: Install 'fzf' for a fully searchable interactive picker of all branches."
+        fi
+
+        printf "\nEnter branch numbers to merge (e.g., 1 3 5), or 'q' to quit: "
+        read -r input
+        if [[ "$input" == "q" ]]; then exit 0; fi
+        for idx in $input; do
+            if [[ "$idx" -gt 0 && "$idx" -le "$count" ]]; then
+                local selected_annotated="${annotated_branches[$((idx-1))]}"
+                selected_features+=("${selected_annotated%% *}")
+            fi
+        done
+    fi
+
+    if [[ ${#selected_features[@]} -eq 0 ]]; then
+        log_warn "No features selected. Aborting."
+        exit 0
+    fi
+
+    log_info "Selected features: ${selected_features[*]}"
     do_merge "$name" "$base" ${selected_features[@]+"${selected_features[@]}"}
 }
 
