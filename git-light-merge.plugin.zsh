@@ -1,5 +1,5 @@
 # git-light-merge.plugin.zsh
-# This plugin automatically configures the 'git lm' alias to point to the script's absolute path.
+# This plugin defines direct shell functions for instant git-light-merge execution.
 
 # Get the absolute path of the directory containing this plugin file
 # Support both Zsh and Bash sourcing
@@ -13,18 +13,24 @@ fi
 
 _LM_SCRIPT_EXEC="${_LM_PLUGIN_DIR}/bin/git-light-merge"
 
-# Ensure the script is executable
+# Ensure the script is executable and define shell helper functions
 if [[ -f "$_LM_SCRIPT_EXEC" ]]; then
-    # Only chmod if not executable to save time
     [[ -x "$_LM_SCRIPT_EXEC" ]] || chmod +x "$_LM_SCRIPT_EXEC"
     
-    # Only update git config if it's missing or points to a different location
-    # This significantly speeds up shell startup
-    if [[ "$(git config --global alias.lm 2>/dev/null)" != "!${_LM_SCRIPT_EXEC}" ]]; then
-        git config --global alias.lm "!${_LM_SCRIPT_EXEC}"
-    fi
+    # 1. Define glm function (direct execution, 0ms overhead)
+    eval "glm() { \"${_LM_SCRIPT_EXEC}\" \"\$@\"; }"
+
+    # 2. Define transparent git interceptor function (git lm interceptor, 0ms overhead)
+    eval "git() {
+        if [[ \"\$1\" == \"lm\" ]]; then
+            shift
+            \"${_LM_SCRIPT_EXEC}\" \"\$@\"
+        else
+            command git \"\$@\"
+        fi
+    }"
 fi
 
-# Cleanup local variable to avoid polluting the shell environment
+# Cleanup local variables to avoid polluting the shell environment
 unset _LM_PLUGIN_DIR
 unset _LM_SCRIPT_EXEC

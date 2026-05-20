@@ -56,14 +56,10 @@ Include the plugin in your `.bashrc` in the Git Bash environment:
 
 ## 🗑️ Uninstallation
 
-To remove `git-light-merge`:
+To remove `git-light-merge` completely:
 
-1.  Run the uninstaller script in the repository root:
-    ```bash
-    ./uninstall.sh
-    ```
-2.  Remove the `source` or `zinit` line from your `.zshrc` or `.bashrc`.
-3.  Delete the repository folder.
+1.  Remove the `source` or `zinit` line from your `.zshrc` or `.bashrc`.
+2.  Delete the repository folder.
 
 ---
 
