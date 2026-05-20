@@ -14,6 +14,7 @@ A powerful and lightweight Git automation tool designed to integrate multiple fe
 
 ## 📋 Prerequisites
 
+- **Bash**: 5.0 or higher (Optimized for Bash 5.x, no compatibility wrappers for obsolete versions).
 - **Git**: 2.0 or higher.
 - **Interactive TUI Support** (Built-in!): An interactive selection menu is built-in (`git-lm-picker`) for selecting tasks and features seamlessly.
   - *Note: A native numbered list picker will be used as a fallback if the picker plugin is not found or executed in a non-interactive shell.*

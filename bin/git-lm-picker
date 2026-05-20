@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # git-lm-picker (Pure Bash Interactive Multi-Select Picker)
-# Compatible with macOS Terminal (Bash 3.2+) and Windows Git Bash.
+# Built for modern Bash (Bash 5.0+). No legacy version compatibility wrappers.
+# Compatible with macOS Terminal (Bash 5.x) and Windows Git Bash (Bash 5.x).
 # Zero external binary dependencies.
 #
 # Usage:
@@ -69,7 +70,7 @@ if [[ -n "$selected_input" ]]; then
         b_name="${item%% *}"
         
         # Check if b_name exists in pre_selected list
-        for ps in ${pre_selected[@]+"${pre_selected[@]}"}; do
+        for ps in "${pre_selected[@]}"; do
             if [[ "$b_name" == "$ps" ]]; then
                 selected_indices+=("$i")
                 break
@@ -149,7 +150,7 @@ toggle_selection() {
     local real_idx=${filtered_indices[cursor_idx]}
     local new_selected=()
     local found=0
-    for idx in ${selected_indices[@]+"${selected_indices[@]}"}; do
+    for idx in "${selected_indices[@]}"; do
         if (( idx == real_idx )); then
             found=1
         else
@@ -160,7 +161,7 @@ toggle_selection() {
         selected_indices+=("$real_idx")
     else
         selected_indices=()
-        for idx in ${new_selected[@]+"${new_selected[@]}"}; do
+        for idx in "${new_selected[@]}"; do
             selected_indices+=("$idx")
         done
     fi
@@ -189,15 +190,15 @@ while true; do
 
     # Draw header & search field
     printf "\e[K\e[36m%s\e[0m\n" "$header_prompt"
-    (( lines_drawn++ ))
+    lines_drawn=$((lines_drawn + 1))
     
     printf "\e[K\e[1mSearch: \e[0m\e[33m%s\e[0m\e[5m|\e[0m\n" "$filter"
-    (( lines_drawn++ ))
+    lines_drawn=$((lines_drawn + 1))
 
     total_filtered=${#filtered_indices[@]}
     if (( total_filtered == 0 )); then
         printf "\e[K  \e[31mNo matching branches.\e[0m\n"
-        (( lines_drawn++ ))
+        lines_drawn=$((lines_drawn + 1))
     else
         # Viewport height limit (10 items max, auto-scrolls)
         view_height=10
@@ -227,7 +228,7 @@ while true; do
             
             # Check if this item is selected
             is_selected=0
-            for s_idx in ${selected_indices[@]+"${selected_indices[@]}"}; do
+            for s_idx in "${selected_indices[@]}"; do
                 if (( s_idx == real_idx )); then
                     is_selected=1
                     break
@@ -254,7 +255,7 @@ while true; do
             else
                 printf "\e[K%b%b%s\n" "$cursor_prefix" "$checkbox" "$item_text"
             fi
-            (( lines_drawn++ ))
+            lines_drawn=$((lines_drawn + 1))
         done
 
         # Render helper text at the bottom
@@ -271,7 +272,7 @@ while true; do
                 printf "\e[K  \e[90m-- %d matches (Space/Tab to select, Enter to confirm, ESC/Ctrl+C to quit) --\e[0m\n" "$total_filtered"
             fi
         fi
-        (( lines_drawn++ ))
+        lines_drawn=$((lines_drawn + 1))
     fi
 
     # --- Read & Handle Key ---
@@ -280,12 +281,12 @@ while true; do
     case "$action" in
         UP)
             if (( cursor_idx > 0 )); then
-                (( cursor_idx-- ))
+                cursor_idx=$((cursor_idx - 1))
             fi
             ;;
         DOWN)
             if (( cursor_idx < total_filtered - 1 )); then
-                (( cursor_idx++ ))
+                cursor_idx=$((cursor_idx + 1))
             fi
             ;;
         SPACE|TAB)
@@ -333,6 +334,6 @@ while true; do
 done
 
 # Output selected items to original stdout (FD 3)
-for idx in ${selected_indices[@]+"${selected_indices[@]}"}; do
+for idx in "${selected_indices[@]}"; do
     echo "${branches[idx]}" >&3
 done
