@@ -103,8 +103,7 @@ When a conflict occurs during merging:
 
 Customize the tool via environment variables:
 
-- `GIT_LM_USER`: User identifier for branch names (Default: system username).
-- `GIT_LM_TEMPLATE`: Branch naming template (Default: `light-merge/{user}-{name}`).
+- `GIT_LM_TEMPLATE`: Branch naming template (Default: `light-merge/{name}`).
 
 ---
 

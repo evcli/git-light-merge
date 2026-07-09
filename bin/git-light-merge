@@ -9,8 +9,7 @@ set -euo pipefail
 #
 # Requires modern Bash (Bash 5.0+). Optimized for Bash 5.x syntax and performance.
 
-LM_USER="${GIT_LM_USER:-${USER:-${USERNAME:-unknown}}}"
-LM_NAME_TEMPLATE="${GIT_LM_TEMPLATE:-"light-merge/{user}-{name}"}"
+LM_NAME_TEMPLATE="${GIT_LM_TEMPLATE:-"light-merge/{name}"}"
 LM_PREFIX="${LM_NAME_TEMPLATE%%\{*}" 
 LM_GIT_DIR=""
 LM_STATE_ROOT=""
@@ -108,9 +107,16 @@ get_state_dir() {
 resolve_lm_branch() {
     local var_name=$1
     local name=$2
-    local target="${LM_NAME_TEMPLATE//\{user\}/$LM_USER}"
-    target="${target//\{name\}/$name}"
+    local target="${LM_NAME_TEMPLATE//\{name\}/$name}"
     printf -v "$var_name" "%s" "$target"
+}
+
+get_lm_task_name() {
+    local full_name="$1"
+    local suffix="${full_name#$LM_PREFIX}"
+    local name_prefix="${LM_NAME_TEMPLATE#$LM_PREFIX}"
+    name_prefix="${name_prefix%%\{name\}*}"
+    echo "${suffix#$name_prefix}"
 }
 
 # Helper to find the target LM branch when not on one
@@ -139,8 +145,7 @@ find_target_lm() {
         # Dynamically let the user pick one task interactively!
         local task_list=""
         for b in "${branches[@]}"; do
-            local n="${b#$LM_PREFIX}"
-            local clean_name="${n#$LM_USER-}"
+            local clean_name=$(get_lm_task_name "$b")
             task_list="$task_list$clean_name"$'\n'
         done
         
@@ -212,8 +217,7 @@ do_merge() {
     shift 2
     local features=("$@")
     
-    local target_branch="${LM_NAME_TEMPLATE//\{user\}/$LM_USER}"
-    target_branch="${target_branch//\{name\}/$name}"
+    local target_branch="${LM_NAME_TEMPLATE//\{name\}/$name}"
     
     if [[ -n "$(git status --porcelain)" ]]; then
         log_err "Error: Working tree is not clean."
@@ -391,12 +395,8 @@ pick_cmd() {
         fi
         local resolved_branch="$LM_RESOLVED_BRANCH"
         
-        # Extract the clean name from the resolved full branch name (e.g. light-merge/evan-test -> test)
-        local suffix="${resolved_branch#$LM_PREFIX}"
-        local user_prefix="${LM_NAME_TEMPLATE#$LM_PREFIX}"
-        user_prefix="${user_prefix%%\{name\}*}"
-        user_prefix="${user_prefix//\{user\}/$LM_USER}"
-        name="${suffix#$user_prefix}"
+        # Extract the clean name from the resolved full branch name
+        name=$(get_lm_task_name "$resolved_branch")
     else
         name=$1
     fi
@@ -586,7 +586,7 @@ refresh_cmd() {
         git fetch origin "${fetch_args[@]}" 2>/dev/null || true
     fi
     
-    local name="${full_name#$LM_PREFIX}"; name="${name#$LM_USER-}"
+    local name=$(get_lm_task_name "$full_name")
     do_merge "$name" "$LM_BASE" "${LM_FEATURES[@]}"
 }
 
@@ -739,7 +739,7 @@ add_cmd() {
     for f in "${LM_FEATURES[@]}"; do
         if [[ "$f" == "$feature" ]]; then
             log_info "Feature $feature is already in $full_name. Refreshing..."
-            local name="${full_name#$LM_PREFIX}"; name="${name#$LM_USER-}"
+            local name=$(get_lm_task_name "$full_name")
             do_merge "$name" "$LM_BASE" "${LM_FEATURES[@]}"
             return
         fi
@@ -747,7 +747,7 @@ add_cmd() {
     
     # 4. Add and rebuild
     LM_FEATURES+=("$feature")
-    local name="${full_name#$LM_PREFIX}"; name="${name#$LM_USER-}"
+    local name=$(get_lm_task_name "$full_name")
     log_info "Adding $feature to $full_name..."
     do_merge "$name" "$LM_BASE" "${LM_FEATURES[@]}"
 }
@@ -789,7 +789,7 @@ rm_cmd() {
     fi
     
     # 4. Rebuild
-    local name="${full_name#$LM_PREFIX}"; name="${name#$LM_USER-}"
+    local name=$(get_lm_task_name "$full_name")
     log_info "Removing $feature from $full_name..."
     do_merge "$name" "$LM_BASE" "${new_features[@]}"
 }
