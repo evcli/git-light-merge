@@ -12,8 +12,13 @@ set -euo pipefail
 LM_NAME_TEMPLATE="${GIT_LM_TEMPLATE:-"light-merge/{name}"}"
 LM_PREFIX="${LM_NAME_TEMPLATE%%\{*}" 
 LM_GIT_DIR=""
-LM_STATE_ROOT=""
+LM_PENDING_ROOT=""
 GIT_LM_PICKER_PLUGIN="${GIT_LM_PICKER_PLUGIN:-}"
+LM_BASE=""
+declare -a LM_FEATURES=()
+declare -a LM_PENDING=()
+LM_RESOLVED_BRANCH=""
+
 
 ensure_picker_plugin() {
     if [[ -z "$GIT_LM_PICKER_PLUGIN" ]]; then
@@ -31,6 +36,43 @@ log_info() { printf "\e[32m%b\e[0m\n" "$*" >&2; }
 log_warn() { printf "\e[33m%b\e[0m\n" "$*" >&2; }
 log_err()  { printf "\e[31m%b\e[0m\n" "$*" >&2; }
 
+format_state_line() {
+    local indent="$1"
+    local label="$2"
+    local info="$3"
+    local base="$4"
+    local features="$5"
+    
+    local label_color=""
+    local label_text=""
+    if [[ "$label" == "local" ]]; then
+        label_color="\e[36m" # Cyan
+        label_text="local:  "
+    else
+        label_color="\e[34m" # Blue
+        label_text="remote: "
+    fi
+    
+    local info_formatted=""
+    if [[ -n "$info" ]]; then
+        info_formatted=$(printf "\e[90m%-35s\e[0m" "$info")
+    else
+        info_formatted=$(printf "%-35s" "")
+    fi
+    
+    local base_formatted=""
+    if [[ -n "$base" ]]; then
+        base_formatted="[\e[1;36m${base}\e[0m]"
+    fi
+    
+    local features_formatted=""
+    if [[ -n "$features" ]]; then
+        features_formatted="(\e[32m${features}\e[0m)"
+    fi
+    
+    printf "%s%b%s\e[0m %b %b %b\n" "$indent" "$label_color" "$label_text" "$info_formatted" "$base_formatted" "$features_formatted"
+}
+
 show_help() {
     cat <<EOF
 Usage: git lm [command] [options]
@@ -43,11 +85,13 @@ Commands:
   git lm status|st [name]                      Show status (auto-selects if unique)
   git lm refresh|rf [name] [--base branch]     Update base/features and rebuild task
   git lm list|ls                               List all light-merge tasks
-  git lm push [name]                           Push to remote
+  git lm push [name]                           Push local task to remote (override remote)
+  git lm pull [name]                           Pull remote task to local (override local)
+  git lm sync [name]                           Sync task with remote (newest commit wins)
   git lm continue|con                          Continue after resolving conflicts
-  git lm abort [name]                          Stop and delete a task
-  git lm clear                                 Delete ALL light-merge tasks
-  git lm prune                                 Cleanup old state files
+  git lm abort [name] [-r]                     Stop and delete a task; -r also deletes remote branch
+  git lm clear                                 Delete ALL local light-merge branches
+  git lm prune                                 Cleanup orphaned in-progress conflict files
 
 Options:
   --base <branch>   Specify base branch
@@ -59,7 +103,7 @@ ensure_git_repo() {
         log_err "Error: Not a git repository"
         exit 1
     }
-    LM_STATE_ROOT="$LM_GIT_DIR/light-merge"
+    LM_PENDING_ROOT="$LM_GIT_DIR/light-merge-pending"
 }
 
 resolve_ref() {
@@ -96,17 +140,26 @@ get_lm_name() {
     get_current_branch
 }
 
-get_state_dir() {
+get_pending_dir() {
     local var_name=$1
     local full_name=$2
-    # Replace chars that are problematic in paths across OSes
     local safe_name="${full_name//[\/\\ :*?\"<>|]/__}"
-    printf -v "$var_name" "%s" "$LM_STATE_ROOT/$safe_name"
+    printf -v "$var_name" "%s" "$LM_PENDING_ROOT/$safe_name"
+}
+
+clear_pending_state() {
+    local name=$1
+    local pending_dir
+    get_pending_dir pending_dir "$name"
+    rm -rf "$pending_dir"
 }
 
 resolve_lm_branch() {
     local var_name=$1
     local name=$2
+    if [[ "$name" == "$LM_PREFIX"* ]]; then
+        name=$(get_lm_task_name "$name")
+    fi
     local target="${LM_NAME_TEMPLATE//\{name\}/$name}"
     printf -v "$var_name" "%s" "$target"
 }
@@ -120,6 +173,7 @@ get_lm_task_name() {
 }
 
 # Helper to find the target LM branch when not on one
+# Scans both local and remote-tracking branches so pull/sync work on remote-only tasks
 find_target_lm() {
     local input_name="${1:-}"
     LM_RESOLVED_BRANCH=""
@@ -136,19 +190,40 @@ find_target_lm() {
         return 0
     fi
     
-    local branches=($(git branch --list "${LM_PREFIX}*" --format='%(refname:short)'))
-    if [[ ${#branches[@]} -eq 1 ]]; then
-        log_info "Auto-selecting task: ${branches[0]}"
-        LM_RESOLVED_BRANCH="${branches[0]}"
+    # Collect unique task names from local + remote branches
+    declare -A seen_tasks
+    local task_list=""
+    local all_refs
+    all_refs=$(git for-each-ref --format='%(refname:short)' "refs/heads/${LM_PREFIX}*" "refs/remotes/origin/${LM_PREFIX}*" 2>/dev/null || true)
+    while read -r ref; do
+        [[ -z "$ref" ]] && continue
+        local branch="$ref"
+        # Strip 'origin/' prefix for remote refs to get the canonical branch name
+        if [[ "$branch" == "origin/${LM_PREFIX}"* ]]; then
+            branch="${branch#origin/}"
+        fi
+        local task=$(get_lm_task_name "$branch")
+        if [[ -z "${seen_tasks[$task]:-}" ]]; then
+            seen_tasks["$task"]="$branch"
+            task_list="$task_list$task"$'\n'
+        fi
+    done <<< "$all_refs"
+    
+    local task_count
+    task_count=$(printf "%s" "$task_list" | grep -c . 2>/dev/null || echo 0)
+    
+    if [[ $task_count -eq 0 ]]; then
+        log_err "Error: No light-merge tasks found."
+        return 1
+    elif [[ $task_count -eq 1 ]]; then
+        local only_task
+        only_task=$(printf "%s" "$task_list" | tr -d '\n')
+        local resolved
+        resolve_lm_branch resolved "$only_task"
+        log_info "Auto-selecting task: $resolved"
+        LM_RESOLVED_BRANCH="$resolved"
         return 0
-    elif [[ ${#branches[@]} -gt 1 ]]; then
-        # Dynamically let the user pick one task interactively!
-        local task_list=""
-        for b in "${branches[@]}"; do
-            local clean_name=$(get_lm_task_name "$b")
-            task_list="$task_list$clean_name"$'\n'
-        done
-        
+    else
         local choice=""
         local exit_code=0
         ensure_picker_plugin
@@ -169,45 +244,78 @@ find_target_lm() {
             log_err "Error: No task selected."
             return 1
         fi
-    else
-        log_err "Error: No light-merge tasks found."
-        return 1
     fi
 }
 
-save_state() {
+save_pending_state() {
+    # Only used when a merge conflict occurs to track in-progress state
     local name=$1
     local base=$2
     local features_content="$3"
     local pending_content="$4"
-    local state_dir
-    get_state_dir state_dir "$name"
-    
-    mkdir -p "$state_dir"
-    echo "$base" > "$state_dir/base"
-    printf "%s" "$features_content" > "$state_dir/features"
-    printf "%s" "$pending_content" > "$state_dir/pending"
+    local pending_dir
+    get_pending_dir pending_dir "$name"
+    mkdir -p "$pending_dir"
+    echo "$base" > "$pending_dir/base"
+    printf "%s" "$features_content" > "$pending_dir/features"
+    printf "%s" "$pending_content" > "$pending_dir/pending"
+}
+
+load_pending_state() {
+    # Loads in-progress conflict state from local pending files
+    local name=$1
+    local pending_dir
+    get_pending_dir pending_dir "$name"
+    if [[ ! -f "$pending_dir/pending" || ! -s "$pending_dir/pending" ]]; then
+        return 1
+    fi
+    LM_BASE=$(cat "$pending_dir/base")
+    LM_FEATURES=()
+    while read -r line || [[ -n "$line" ]]; do [[ -n "$line" ]] && LM_FEATURES+=("$line"); done < "$pending_dir/features"
+    LM_PENDING=()
+    while read -r line || [[ -n "$line" ]]; do [[ -n "$line" ]] && LM_PENDING+=("$line"); done < "$pending_dir/pending"
+    return 0
 }
 
 load_state() {
     local name=$1
-    local state_dir
-    get_state_dir state_dir "$name"
-    
-    if [[ ! -d "$state_dir" ]]; then
-        return 1
-    fi
-    
-    LM_BASE=$(cat "$state_dir/base")
-    # Read line by line safely
+    LM_BASE=""
     LM_FEATURES=()
-    while read -r line || [[ -n "$line" ]]; do [[ -n "$line" ]] && LM_FEATURES+=("$line"); done < "$state_dir/features"
-    
     LM_PENDING=()
-    if [[ -f "$state_dir/pending" ]]; then
-        while read -r line || [[ -n "$line" ]]; do [[ -n "$line" ]] && LM_PENDING+=("$line"); done < "$state_dir/pending"
+    
+    # 1. Check for in-progress conflict state first
+    if load_pending_state "$name"; then
+        return 0
     fi
-    return 0
+    
+    # 2. Load from branch commit message (local branch preferred, fallback to remote-tracking)
+    local ref=""
+    if [[ "$name" == "origin/"* ]]; then
+        ref="refs/remotes/$name"
+    elif [[ "$name" == "refs/"* ]]; then
+        ref="$name"
+    else
+        ref="refs/heads/$name"
+        if ! git show-ref --verify -q "$ref" 2>/dev/null; then
+            ref="refs/remotes/origin/$name"
+        fi
+    fi
+    
+    if git show-ref --verify -q "$ref" 2>/dev/null; then
+        local msg
+        msg=$(git log -1 --format=%B "$ref" 2>/dev/null)
+        local pattern='LM-State:[[:space:]]*([^;]+);[[:space:]]*(.*)'
+        if [[ "$msg" =~ $pattern ]]; then
+            LM_BASE="${BASH_REMATCH[1]}"
+            LM_BASE="${LM_BASE%%[[:space:]]}"
+            local feats="${BASH_REMATCH[2]}"
+            feats="${feats%"${feats##*[![:space:]]}"}"
+            read -ra LM_FEATURES <<< "$feats"
+            [[ -n "$LM_BASE" ]] && return 0
+        fi
+    fi
+    
+    return 1
 }
 
 # Core merge logic
@@ -259,7 +367,7 @@ run_merge_loop() {
             local remaining=("${queue[@]:$((i-1))}")
             local feat_content=$(printf "%s\n" "${LM_FEATURES[@]}")
             local pend_content=$(printf "%s\n" "${remaining[@]}")
-            save_state "$target_branch" "$base" "$feat_content" "$pend_content"
+            save_pending_state "$target_branch" "$base" "$feat_content" "$pend_content"
             log_warn "Manual steps:"
             log_info "  1. Resolve conflicts"
             log_info "  2. git add . && git commit"
@@ -276,20 +384,45 @@ run_merge_loop() {
     log_info "Finalizing squash merge..."
     git reset -q --soft "$(resolve_ref "$base")" >/dev/null 2>&1
     
-    local msg_list=""
-    for f in "${LM_FEATURES[@]}"; do msg_list="$msg_list\n- $f"; done
-    printf "Integrated: $target_branch\n\nIncluded features:$msg_list" | git commit -q --allow-empty -F - >/dev/null 2>&1
+    # Write state as machine-readable single-line in commit message
+    echo "LM-State: $base;${LM_FEATURES[*]}" | git commit -q --allow-empty -F - >/dev/null 2>&1
     
-    local feat_content=$(printf "%s\n" "${LM_FEATURES[@]}")
-    save_state "$target_branch" "$base" "$feat_content" ""
+    # Clear any in-progress pending state (merge completed successfully)
+    clear_pending_state "$target_branch"
+    
     printf "\e[90m========================================\e[0m\n" >&2
     printf "\e[1;32mSuccess!\e[0m\n" >&2
-    printf "\e[1;36mTarget:   \e[1;33m%s\e[0m\n" "$target_branch" >&2
-    printf "\e[1;36mBase:     \e[0m%s\n" "$base" >&2
-    printf "\e[1;36mFeatures:\e[0m\n" >&2
-    for f in "${LM_FEATURES[@]}"; do
-        printf "  \e[32m-\e[0m %s\n" "$f" >&2
-    done
+    printf "Target: \e[1;33m%s\e[0m\n" "$target_branch" >&2
+    
+    local local_info=$(get_commit_info_str "refs/heads/$target_branch")
+    format_state_line "" "local" "$local_info" "$base" "${LM_FEATURES[*]}" >&2
+    
+    # Load and show remote state
+    local remote_ref="refs/remotes/origin/$target_branch"
+    if git show-ref --verify -q "$remote_ref" 2>/dev/null; then
+        local saved_base="$LM_BASE"
+        local saved_features=("${LM_FEATURES[@]}")
+        local remote_base=""
+        local remote_features=()
+        if load_state "origin/$target_branch" >/dev/null 2>&1; then
+            remote_base="$LM_BASE"
+            remote_features=("${LM_FEATURES[@]}")
+        fi
+        LM_BASE="$saved_base"
+        LM_FEATURES=("${saved_features[@]}")
+        
+        local remote_info=$(get_commit_info_str "$remote_ref")
+        format_state_line "" "remote" "$remote_info" "$remote_base" "${remote_features[*]}" >&2
+        
+        # Print warning if they are different
+        local local_sha=$(git rev-parse -q --verify "refs/heads/$target_branch" 2>/dev/null)
+        local remote_sha=$(git rev-parse -q --verify "$remote_ref" 2>/dev/null)
+        if [[ "$local_sha" != "$remote_sha" ]]; then
+            printf "        \e[1;33m(Local is ahead/inconsistent. Run 'git lm push' or 'git lm sync' to update remote)\e[0m\n" >&2
+        fi
+    else
+        printf "remote: \e[90m(local-only)\e[0m\n" >&2
+    fi
     printf "\e[90m========================================\e[0m\n" >&2
 }
 
@@ -299,10 +432,12 @@ continue_cmd() {
         log_err "Error: Not on a LM branch"
         exit 1
     fi
-    load_state "$target_branch" || { log_err "Error: No state found"; exit 1; }
+    # continue only applies when there is in-progress pending state
+    load_pending_state "$target_branch" || { log_err "Error: No in-progress merge state found for '$target_branch'."; exit 1; }
     
     if [[ ${#LM_PENDING[@]} -eq 0 ]]; then
         log_info "Nothing to continue."
+        clear_pending_state "$target_branch"
         exit 0
     fi
 
@@ -317,64 +452,271 @@ continue_cmd() {
 
 status_cmd() {
     find_target_lm "${1:-}" || return 1
-
     local full_name="$LM_RESOLVED_BRANCH"
+    local name=$(get_lm_task_name "$full_name")
 
-    if load_state "$full_name"; then
-        echo "Branch  : $full_name"
-        echo "Base    : $LM_BASE"
-        echo "Features: ${LM_FEATURES[*]}"
-        [[ ${#LM_PENDING[@]} -gt 0 ]] && log_warn "Pending : ${LM_PENDING[*]}"
+    local local_ref="refs/heads/$full_name"
+    local remote_ref="refs/remotes/origin/$full_name"
+    
+    local has_local=0
+    local has_remote=0
+    git show-ref --verify -q "$local_ref" && has_local=1
+    git show-ref --verify -q "$remote_ref" && has_remote=1
+
+    if [[ $has_local -eq 1 ]]; then
+        if load_state "$full_name"; then
+            printf "Branch  : \e[1;33m%s\e[0m\n" "$full_name"
+            printf "Base    : \e[1;36m%s\e[0m\n" "$LM_BASE"
+            printf "Features: \e[32m%s\e[0m\n" "${LM_FEATURES[*]}"
+            [[ ${#LM_PENDING[@]} -gt 0 ]] && log_warn "Pending : ${LM_PENDING[*]}"
+            
+            # Print commit info
+            local info_str=$(get_commit_info_str "$local_ref")
+            [[ -n "$info_str" ]] && printf "Commit  : Local [\e[90m%s\e[0m]\n" "$info_str"
+        else
+            log_err "Error: No local state found for $full_name"
+        fi
+    elif [[ $has_remote -eq 1 ]]; then
+        if load_state "origin/$full_name"; then
+            printf "Branch  : \e[1;34morigin/%s\e[0m (remote-only)\n" "$name"
+            printf "Base    : \e[1;36m%s\e[0m\n" "$LM_BASE"
+            printf "Features: \e[32m%s\e[0m\n" "${LM_FEATURES[*]}"
+            
+            # Print commit info
+            local info_str=$(get_commit_info_str "$remote_ref")
+            [[ -n "$info_str" ]] && printf "Commit  : Remote [\e[90m%s\e[0m]\n" "$info_str"
+        else
+            log_err "Error: No remote state found for $full_name"
+        fi
     else
-        log_err "Error: No state found for $full_name"
+        log_err "Error: No task branch found for $full_name"
+        return 1
+    fi
+
+    # Print sync status
+    if [[ $has_local -eq 1 && $has_remote -eq 1 ]]; then
+        local local_sha=$(git rev-parse -q --verify "$local_ref" 2>/dev/null)
+        local remote_sha=$(git rev-parse -q --verify "$remote_ref" 2>/dev/null)
+        if [[ "$local_sha" == "$remote_sha" ]]; then
+            printf "Sync    : \e[1;32mUp-to-date with origin\e[0m\n"
+        else
+            log_warn "Sync    : Inconsistent with remote!"
+            
+            # Load local details
+            local local_info=$(get_commit_info_str "$local_ref")
+            local local_base=""
+            local local_features=()
+            local saved_base="$LM_BASE"
+            local saved_features=("${LM_FEATURES[@]}")
+            if load_state "$full_name" >/dev/null 2>&1; then
+                local_base="$LM_BASE"
+                local_features=("${LM_FEATURES[@]}")
+            fi
+            LM_BASE="$saved_base"
+            LM_FEATURES=("${saved_features[@]}")
+            
+            # Load remote details
+            local remote_info=$(get_commit_info_str "$remote_ref")
+            local remote_base=""
+            local remote_features=()
+            if load_state "origin/$full_name" >/dev/null 2>&1; then
+                remote_base="$LM_BASE"
+                remote_features=("${LM_FEATURES[@]}")
+            fi
+            LM_BASE="$saved_base"
+            LM_FEATURES=("${saved_features[@]}")
+            
+            format_state_line "          " "local" "$local_info" "$local_base" "${local_features[*]}"
+            format_state_line "          " "remote" "$remote_info" "$remote_base" "${remote_features[*]}"
+            
+            local local_time=$(git log -1 --format="%at" "$local_ref" 2>/dev/null || echo "0")
+            local remote_time=$(git log -1 --format="%at" "$remote_ref" 2>/dev/null || echo "0")
+            if [[ "$local_time" -gt "$remote_time" ]]; then
+                log_info "          (Local is newer. Run 'git lm push' to push or 'git lm sync' to sync)"
+            else
+                log_info "          (Remote is newer. Run 'git lm pull' to pull or 'git lm sync' to sync)"
+            fi
+        fi
+    elif [[ $has_remote -eq 1 ]]; then
+        log_info "Sync    : Remote-only (run 'git lm pull' to checkout)"
+    else
+        log_info "Sync    : Local-only (run 'git lm push' to share)"
     fi
 }
 
 abort_cmd() {
-    find_target_lm "${1:-}" || return 1
+    local delete_remote=0
+    local args=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -r) delete_remote=1; shift ;;
+            *)  args+=("$1"); shift ;;
+        esac
+    done
+
+    find_target_lm "${args[0]:-}" || return 1
     local target_branch="$LM_RESOLVED_BRANCH"
-    load_state "$target_branch" && {
-        git checkout "$LM_BASE"
+    
+    # Load state to get base branch for checkout
+    if load_state "$target_branch"; then
+        local base="$LM_BASE"
+    else
+        # No state — just try to checkout a sensible branch
+        local base
+        base=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null || echo "")
+        base="${base#refs/remotes/origin/}"
+        base="${base:-main}"
+    fi
+    
+    # If currently on this branch, switch away first
+    local current=$(get_current_branch)
+    if [[ "$current" == "$target_branch" ]]; then
+        git checkout -q "$base" 2>/dev/null || git checkout -q main 2>/dev/null || git checkout -q master 2>/dev/null || true
+    fi
+    
+    # Delete local branch if it exists
+    if git show-ref --verify -q "refs/heads/$target_branch" 2>/dev/null; then
         git branch -D "$target_branch"
-        local state_dir
-        get_state_dir state_dir "$target_branch"
-        rm -rf "$state_dir"
-        log_info "Aborted and cleaned up $target_branch."
-    }
+        log_info "Deleted local branch '$target_branch'."
+    fi
+    
+    # Clear in-progress pending state
+    clear_pending_state "$target_branch"
+    
+    # Optionally delete remote branch
+    if [[ $delete_remote -eq 1 ]]; then
+        if git push origin --delete "$target_branch" 2>/dev/null; then
+            log_info "Deleted remote branch 'origin/$target_branch'."
+        else
+            log_warn "Could not delete remote branch 'origin/$target_branch' (may not exist)."
+        fi
+    fi
+    
+    log_info "Aborted: $target_branch"
 }
 
 prune_cmd() {
-    log_info "Pruning orphaned state files..."
+    log_info "Pruning orphaned in-progress conflict files..."
     local count=0
-    if [[ -d "$LM_STATE_ROOT" ]]; then
-        for d in "$LM_STATE_ROOT"/*; do
+    if [[ -d "$LM_PENDING_ROOT" ]]; then
+        for d in "$LM_PENDING_ROOT"/*; do
             [[ -d "$d" ]] || continue
             local safe_name=$(basename "$d")
-            # Restore the name (though approximate since multiple names can map to same safe name)
-            # Actually, the best way is to check if any branch matches the directory name pattern
+            # Check if any local branch still corresponds to this pending dir
             local found=0
-            local branches=($(git branch --list --format='%(refname:short)'))
+            local branches=($(git branch --list "${LM_PREFIX}*" --format='%(refname:short)'))
             for b in "${branches[@]}"; do
                 local s="${b//[\/\\ :*?\"<>|]/__}"
                 if [[ "$s" == "$safe_name" ]]; then
                     found=1; break
                 fi
             done
-            
             if [[ $found -eq 0 ]]; then
                 rm -rf "$d"
                 count=$((count + 1))
             fi
         done
+        find "$LM_PENDING_ROOT" -type d -empty -delete 2>/dev/null || true
     fi
-    find "$LM_STATE_ROOT" -type d -empty -delete 2>/dev/null || true
-    log_info "Cleaned up $count orphaned tasks."
+    log_info "Cleaned up $count orphaned conflict state(s)."
 }
 
 push_cmd() {
-    local target_branch=$(get_current_branch)
-    log_info "Pushing to origin..."
-    git push origin "$target_branch"
+    local name="${1:-}"
+    find_target_lm "$name" || return 1
+    local full_name="$LM_RESOLVED_BRANCH"
+    
+    # Verify local branch exists
+    if ! git show-ref --verify -q "refs/heads/$full_name" 2>/dev/null; then
+        log_err "Error: Local branch '$full_name' does not exist."
+        return 1
+    fi
+    
+    # Check if remote branch exists. If so, delete it first.
+    local remote_ref="refs/remotes/origin/$full_name"
+    if git show-ref --verify -q "$remote_ref" 2>/dev/null; then
+        log_info "Deleting remote branch '$full_name' on origin first..."
+        git push origin --delete "$full_name" || true
+    fi
+    
+    log_info "Pushing local branch '$full_name' to origin..."
+    git push origin "$full_name:$full_name"
+}
+
+pull_cmd() {
+    local name="${1:-}"
+    find_target_lm "$name" || return 1
+    local full_name="$LM_RESOLVED_BRANCH"
+    
+    local remote_ref="refs/remotes/origin/$full_name"
+    if ! git show-ref --verify -q "$remote_ref" 2>/dev/null; then
+        log_err "Error: Remote branch 'origin/$full_name' does not exist."
+        return 1
+    fi
+    
+    local local_ref="refs/heads/$full_name"
+    if ! git show-ref --verify -q "$local_ref" 2>/dev/null; then
+        log_info "Creating local branch '$full_name' from remote 'origin/$full_name'..."
+        git checkout -b "$full_name" --track "origin/$full_name"
+    else
+        log_info "Overriding local branch '$full_name' with remote 'origin/$full_name'..."
+        local current=$(get_current_branch)
+        if [[ "$current" == "$full_name" ]]; then
+            git reset --hard "origin/$full_name"
+        else
+            git branch -f "$full_name" "origin/$full_name"
+        fi
+    fi
+}
+
+sync_cmd() {
+    local name="${1:-}"
+    find_target_lm "$name" || return 1
+    local full_name="$LM_RESOLVED_BRANCH"
+    
+    local local_ref="refs/heads/$full_name"
+    local remote_ref="refs/remotes/origin/$full_name"
+    
+    local has_local=0
+    local has_remote=0
+    git show-ref --verify -q "$local_ref" && has_local=1
+    git show-ref --verify -q "$remote_ref" && has_remote=1
+    
+    if [[ $has_local -eq 0 && $has_remote -eq 0 ]]; then
+        log_err "Error: light-merge task '$full_name' not found locally or remotely."
+        return 1
+    fi
+    
+    if [[ $has_local -eq 1 && $has_remote -eq 0 ]]; then
+        log_info "Task '$full_name' is local-only. Pushing to origin..."
+        push_cmd "$full_name"
+        return 0
+    fi
+    
+    if [[ $has_local -eq 0 && $has_remote -eq 1 ]]; then
+        log_info "Task '$full_name' is remote-only. Pulling from origin..."
+        pull_cmd "$full_name"
+        return 0
+    fi
+    
+    # Both exist, compare commit timestamps
+    local local_time
+    local_time=$(git log -1 --format="%at" "$local_ref" 2>/dev/null || echo "0")
+    local remote_time
+    remote_time=$(git log -1 --format="%at" "$remote_ref" 2>/dev/null || echo "0")
+    
+    if [[ "$local_time" -eq "$remote_time" ]]; then
+        log_info "Task '$full_name' is already in sync with remote."
+        return 0
+    fi
+    
+    if [[ "$local_time" -gt "$remote_time" ]]; then
+        log_info "Local task '$full_name' is newer ($local_time > $remote_time). Pushing to remote..."
+        push_cmd "$full_name"
+    else
+        log_info "Remote task '$full_name' is newer ($remote_time > $local_time). Pulling to local..."
+        pull_cmd "$full_name"
+    fi
 }
 
 pick_cmd() {
@@ -413,27 +755,12 @@ pick_cmd() {
             base="$LM_BASE"
             log_info "Reusing existing base: $base"
         else
-            # Try to read local cache first
-            if [[ -f "$LM_STATE_ROOT/.default_branch" ]]; then
-                base=$(cat "$LM_STATE_ROOT/.default_branch" 2>/dev/null)
-            fi
-            
-            # Fall back to 1-subprocess fast auto-detection if no cache
-            if [[ -z "$base" ]]; then
-                local ref
-                ref=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null || echo "")
-                local default_branch="${ref#refs/remotes/origin/}"
-                base="${default_branch:-main}"
-                
-                # Write resolved default branch to cache
-                mkdir -p "$LM_STATE_ROOT"
-                printf "%s" "$base" > "$LM_STATE_ROOT/.default_branch" 2>/dev/null || true
-            fi
+            # Auto-detect default base branch from remote HEAD
+            local ref
+            ref=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null || echo "")
+            local default_branch="${ref#refs/remotes/origin/}"
+            base="${default_branch:-main}"
         fi
-    else
-        # Update cache whenever --base is explicitly passed
-        mkdir -p "$LM_STATE_ROOT"
-        printf "%s" "$base" > "$LM_STATE_ROOT/.default_branch" 2>/dev/null || true
     fi
 
     # Get branches sorted by committerdate, with local/remote categorization and base excluded
@@ -558,9 +885,6 @@ refresh_cmd() {
     
     if [[ -n "$base" ]]; then
         LM_BASE="$base"
-        # Update cache whenever --base is explicitly passed
-        mkdir -p "$LM_STATE_ROOT"
-        printf "%s" "$base" > "$LM_STATE_ROOT/.default_branch" 2>/dev/null || true
     fi
     
     local has_origin=0
@@ -592,12 +916,12 @@ refresh_cmd() {
 
 clear_cmd() {
     local branches=$(git branch --list "${LM_PREFIX}*" --format='%(refname:short)')
-    if [[ -z "$branches" && ! -d "$LM_STATE_ROOT" ]]; then
-        log_info "No light-merge tasks found."
+    if [[ -z "$branches" ]]; then
+        log_info "No local light-merge branches found."
         return
     fi
 
-    log_warn "This will delete ALL local branches starting with '$LM_PREFIX' and the state directory '$LM_STATE_ROOT'."
+    log_warn "This will delete ALL local branches starting with '$LM_PREFIX'. Remote branches are NOT affected."
     printf "Are you sure? [y/N] "
     read -r opt
     if [[ "$opt" != "y" && "$opt" != "Y" ]]; then
@@ -605,21 +929,18 @@ clear_cmd() {
         return
     fi
     
-    if [[ -n "$branches" ]]; then
-        local current=$(get_current_branch)
-        if [[ "$current" == "$LM_PREFIX"* ]]; then
-              local ref
-              ref=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null || echo "")
-              local default="${ref#refs/remotes/origin/}"
-              default="${default:-master}"
-              log_info "Switching to $default..."
-              git checkout "$default" 2>/dev/null || git checkout main 2>/dev/null || git checkout master 2>/dev/null
-        fi
-        echo "$branches" | xargs git branch -D
+    local current=$(get_current_branch)
+    if [[ "$current" == "$LM_PREFIX"* ]]; then
+        local ref
+        ref=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null || echo "")
+        local default="${ref#refs/remotes/origin/}"
+        default="${default:-main}"
+        log_info "Switching to $default..."
+        git checkout -q "$default" 2>/dev/null || git checkout -q main 2>/dev/null || git checkout -q master 2>/dev/null
     fi
-    
-    rm -rf "$LM_STATE_ROOT"
-    log_info "All light-merge tasks cleared."
+    echo "$branches" | xargs git branch -D
+    rm -rf "$LM_PENDING_ROOT"
+    log_info "All local light-merge branches cleared."
 }
 
 create_cmd() {
@@ -650,27 +971,12 @@ create_cmd() {
             base="$LM_BASE"
             log_info "Reusing existing base: $base"
         else
-            # Try to read local cache first
-            if [[ -f "$LM_STATE_ROOT/.default_branch" ]]; then
-                base=$(cat "$LM_STATE_ROOT/.default_branch" 2>/dev/null)
-            fi
-            
-            # Fall back to 1-subprocess fast auto-detection if no cache
-            if [[ -z "$base" ]]; then
-                local ref
-                ref=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null || echo "")
-                local default_branch="${ref#refs/remotes/origin/}"
-                base="${default_branch:-main}"
-                
-                # Write resolved default branch to cache
-                mkdir -p "$LM_STATE_ROOT"
-                printf "%s" "$base" > "$LM_STATE_ROOT/.default_branch" 2>/dev/null || true
-            fi
+            # Auto-detect default base branch from remote HEAD
+            local ref
+            ref=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null || echo "")
+            local default_branch="${ref#refs/remotes/origin/}"
+            base="${default_branch:-main}"
         fi
-    else
-        # Update cache whenever --base is explicitly passed
-        mkdir -p "$LM_STATE_ROOT"
-        printf "%s" "$base" > "$LM_STATE_ROOT/.default_branch" 2>/dev/null || true
     fi
     
     if [[ ${#features[@]} -eq 0 && "$name" != "--help" && "$name" != "-h" ]]; then
@@ -683,31 +989,145 @@ create_cmd() {
     do_merge "$name" "$base" "${features[@]}"
 }
 
+get_commit_info_str() {
+    local ref="$1"
+    local info
+    info=$(git log -1 --format="%an|%ar" "$ref" 2>/dev/null || true)
+    if [[ -n "$info" ]]; then
+        local author="${info%%|*}"
+        local rel_time="${info#*|}"
+        echo "$rel_time by $author"
+    else
+        echo ""
+    fi
+}
+
 list_cmd() {
-    local branches=$(git branch --list "${LM_PREFIX}*" --format='%(refname:short)')
-    if [[ -z "$branches" ]]; then
+    # Read all local and remote branches in refs/heads/light-merge/ and refs/remotes/origin/light-merge/
+    declare -A local_tasks
+    declare -A remote_tasks
+    
+    local refs
+    refs=$(git for-each-ref --format='%(refname)' "refs/heads/${LM_PREFIX}*" "refs/remotes/origin/${LM_PREFIX}*" 2>/dev/null || true)
+    
+    if [[ -z "$refs" ]]; then
         log_info "No light-merge branches found."
         return
     fi
+
+    while read -r ref; do
+        [[ -z "$ref" ]] && continue
+        if [[ "$ref" == refs/heads/* ]]; then
+            local branch="${ref#refs/heads/}"
+            local task=$(get_lm_task_name "$branch")
+            local_tasks["$task"]="$branch"
+        elif [[ "$ref" == refs/remotes/origin/* ]]; then
+            local branch="${ref#refs/remotes/origin/}"
+            local task=$(get_lm_task_name "$branch")
+            remote_tasks["$task"]="$branch"
+        fi
+    done <<< "$refs"
+
+    # Get union of keys
+    local all_tasks=()
+    for t in "${!local_tasks[@]}"; do
+        all_tasks+=("$t")
+    done
+    for t in "${!remote_tasks[@]}"; do
+        if [[ -z "${local_tasks[$t]:-}" ]]; then
+            all_tasks+=("$t")
+        fi
+    done
     
+    # Sort tasks alphabetically
+    local sorted_tasks=()
+    if [[ ${#all_tasks[@]} -gt 0 ]]; then
+        IFS=$'\n' sorted_tasks=($(sort <<< "${all_tasks[*]}")); unset IFS
+    fi
+
     log_info "Available light-merge branches:"
     local current=$(get_current_branch)
-    while read -r b; do
-        local prefix="  "
-        [[ "$b" == "$current" ]] && prefix="* "
+    
+    for t in "${sorted_tasks[@]}"; do
+        local local_branch="${local_tasks[$t]:-}"
+        local remote_branch="${remote_tasks[$t]:-}"
         
-        # Try to load state to show features
-        if load_state "$b" >/dev/null 2>&1; then
-            # Color the branch name if it's current
-            if [[ "$b" == "$current" ]]; then
-                printf "\e[32m%s%-30s\e[0m [%s] (%s)\n" "$prefix" "$b" "$LM_BASE" "${LM_FEATURES[*]}"
-            else
-                printf "%s%-30s [%s] (%s)\n" "$prefix" "$b" "$LM_BASE" "${LM_FEATURES[*]}"
+        local task_type=""
+        local prefix="  "
+        local is_current=0
+        
+        if [[ -n "$local_branch" && -n "$remote_branch" ]]; then
+            task_type="L+R"
+            if [[ "$local_branch" == "$current" ]]; then
+                prefix="* "
+                is_current=1
+            fi
+        elif [[ -n "$local_branch" ]]; then
+            task_type="L"
+            if [[ "$local_branch" == "$current" ]]; then
+                prefix="* "
+                is_current=1
             fi
         else
-            printf "%s%-30s\n" "$prefix" "$b"
+            task_type="R"
         fi
-    done <<< "$branches"
+        
+        local type_color=""
+        if [[ "$task_type" == "L+R" ]]; then
+            type_color="\e[1;32m" # Green
+        elif [[ "$task_type" == "L" ]]; then
+            type_color="\e[1;36m" # Cyan
+        else
+            type_color="\e[1;34m" # Blue
+        fi
+        
+        local task_name="${LM_PREFIX}${t}"
+        local task_header
+        if [[ $is_current -eq 1 ]]; then
+            task_header="\e[1;32m${task_name}\e[0m (${type_color}${task_type}\e[0m)"
+        else
+            task_header="\e[1;33m${task_name}\e[0m (${type_color}${task_type}\e[0m)"
+        fi
+        printf "%b %b\n" "$prefix" "$task_header"
+        
+        # Local branch details
+        if [[ -n "$local_branch" ]]; then
+            local info_str=$(get_commit_info_str "refs/heads/$local_branch")
+            local local_base=""
+            local local_features=()
+            
+            # Temporarily load local state
+            local saved_base="$LM_BASE"
+            local saved_features=("${LM_FEATURES[@]}")
+            if load_state "$local_branch" >/dev/null 2>&1; then
+                local_base="$LM_BASE"
+                local_features=("${LM_FEATURES[@]}")
+            fi
+            LM_BASE="$saved_base"
+            LM_FEATURES=("${saved_features[@]}")
+            
+            format_state_line "    " "local" "$info_str" "$local_base" "${local_features[*]}"
+        fi
+        
+        # Remote branch details
+        if [[ -n "$remote_branch" ]]; then
+            local info_str=$(get_commit_info_str "refs/remotes/origin/$remote_branch")
+            local remote_base=""
+            local remote_features=()
+            
+            # Temporarily load remote state
+            local saved_base="$LM_BASE"
+            local saved_features=("${LM_FEATURES[@]}")
+            if load_state "origin/$remote_branch" >/dev/null 2>&1; then
+                remote_base="$LM_BASE"
+                remote_features=("${LM_FEATURES[@]}")
+            fi
+            LM_BASE="$saved_base"
+            LM_FEATURES=("${saved_features[@]}")
+            
+            format_state_line "    " "remote" "$info_str" "$remote_base" "${remote_features[*]}"
+        fi
+    done
 }
 
 add_cmd() {
@@ -804,20 +1224,11 @@ main() {
         rm)  shift; rm_cmd "$@" ;;
         status|st) shift; status_cmd "$@" ;;
         list|ls) list_cmd ;;
-        abort)
-            shift
-            local target_task="${1:-}"
-            abort_cmd "$target_task"
-            ;;
+        abort) shift; abort_cmd "$@" ;;
         continue|con) continue_cmd ;;
-        push)
-            find_target_lm "${2:-}" || exit 1
-            local b="$LM_RESOLVED_BRANCH"
-            log_info "Pushing $b to origin..."
-            git push origin --delete "$b" 2>/dev/null || true
-            git checkout "$b" 2>/dev/null
-            push_cmd
-            ;;
+        push) shift; push_cmd "$@" ;;
+        pull) shift; pull_cmd "$@" ;;
+        sync) shift; sync_cmd "$@" ;;
         refresh|rebase|rf) shift; refresh_cmd "$@" ;;
         clear)   clear_cmd ;;
         pick)

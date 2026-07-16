@@ -75,10 +75,10 @@ To remove `git-light-merge` completely:
 > **💡 Pro Tip (Smart Selection)**: For commands like `status`, `refresh`, `add`, `push`, and `abort`, if you are not on a light-merge branch and don't provide a name, the tool will automatically select the target task if only one exists in your repo.
 
 ### Task Management
-- `git lm list|ls` : List all local integration tasks.
+- `git lm list|ls` : List all integration tasks, labeled with type tags: `(L)` (local-only), `(R)` (remote-only), or `(L+R)` (local & remote). For each task, detailed commit info (time and author), base branch, and feature branches are printed in a clean, aligned, and indented layout.
 - `git lm clear` : Delete ALL local integration tasks and state files.
 - `git lm abort` : Stop and delete the current integration task.
-- `git lm push` : Push the integration results to the remote repository.
+- `git lm push` : Push the integration results to origin. For safety and compatibility with branch protection rules, this command first deletes the remote branch on origin and then pushes the new local branch, avoiding direct forced push.
 
 ### Utilities
 - `git lm pick <name> [--base branch]` : Interactively pick features using a beautiful TUI selection menu.
