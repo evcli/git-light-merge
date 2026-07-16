@@ -65,6 +65,8 @@ To remove `git-light-merge` completely:
 
 ## 📖 Usage
 
+> **Shared Task Rule**: Feature branches used in a light-merge task must exist on `origin` first. Local-only branches are shown in `git lm pick` for visibility, but they cannot be merged until they are pushed to `origin`. This keeps generated light-merge tasks refreshable and shareable by teammates.
+
 ### Core Workflow
 - `git lm create|new|mk <name> <features...> [--base branch]` : Create a new task.
 - `git lm add [feature] [name]` : Add a feature to a task. Use `.` for current branch.
@@ -78,7 +80,9 @@ To remove `git-light-merge` completely:
 - `git lm list|ls` : List all integration tasks, labeled with type tags: `(L)` (local-only), `(R)` (remote-only), or `(L+R)` (local & remote). For each task, detailed commit info (time and author), base branch, and feature branches are printed in a clean, aligned, and indented layout.
 - `git lm clear` : Delete ALL local integration tasks and state files.
 - `git lm abort` : Stop and delete the current integration task.
-- `git lm push` : Push the integration results to origin. For safety and compatibility with branch protection rules, this command first deletes the remote branch on origin and then pushes the new local branch, avoiding direct forced push.
+- `git lm push` : Push the integration results to origin. For environments where forced pushes are blocked, this command first deletes the remote branch on origin and then pushes the new local generated branch.
+- `git lm pull` : Pull a remote integration task to local, overriding the local generated branch.
+- `git lm sync` : Sync local and remote integration tasks. If both exist and point to different commits, the newest generated commit wins; if the timestamps are identical, the command refuses to guess and asks you to choose `push` or `pull` explicitly.
 
 ### Utilities
 - `git lm pick <name> [--base branch]` : Interactively pick features using a beautiful TUI selection menu.
@@ -104,6 +108,28 @@ When a conflict occurs during merging:
 Customize the tool via environment variables:
 
 - `GIT_LM_TEMPLATE`: Branch naming template (Default: `light-merge/{name}`).
+
+---
+
+## 🧪 Development / Testing
+
+Run the full smoke test suite from the project root:
+
+```bash
+scripts/smoke-test.sh
+```
+
+You can also run only the tests related to the command you changed by passing one or more test targets:
+
+```bash
+scripts/smoke-test.sh sync
+scripts/smoke-test.sh status sync
+scripts/smoke-test.sh syntax create status sync refresh pick
+```
+
+Available targets: `all`, `syntax`, `create`, `status`, `sync`, `refresh`, and `pick`. Running without arguments is the same as `all`.
+
+The smoke script creates temporary Git repositories and verifies core workflows such as `create`, `status`, `sync`, `refresh`, and native `pick` fallback behavior. It requires Bash 5.0+ and Git.
 
 ---
 
