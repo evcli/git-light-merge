@@ -19,7 +19,7 @@ assert_grep() {
 	local file="$2"
 	if ! grep -q -- "$pattern" "$file"; then
 		printf "Expected pattern not found: %s\n" "$pattern" >&2
-		printf "--- %s ---\n" "$file" >&2
+		printf "%s\n" "--- $file ---" >&2
 		cat "$file" >&2
 		fail "assert_grep failed"
 	fi
@@ -30,9 +30,40 @@ assert_not_grep() {
 	local file="$2"
 	if grep -q -- "$pattern" "$file"; then
 		printf "Unexpected pattern found: %s\n" "$pattern" >&2
-		printf "--- %s ---\n" "$file" >&2
+		printf "%s\n" "--- $file ---" >&2
 		cat "$file" >&2
 		fail "assert_not_grep failed"
+	fi
+}
+
+assert_line_order() {
+	local first_pattern="$1"
+	local second_pattern="$2"
+	local file="$3"
+	local first_line=""
+	local second_line=""
+
+	first_line=$(grep -n -- "$first_pattern" "$file" | head -n 1 | cut -d: -f1 || true)
+	second_line=$(grep -n -- "$second_pattern" "$file" | head -n 1 | cut -d: -f1 || true)
+
+	if [[ -z "$first_line" || -z "$second_line" || "$first_line" -ge "$second_line" ]]; then
+		printf "Expected '%s' to appear before '%s' in %s\n" "$first_pattern" "$second_pattern" "$file" >&2
+		cat "$file" >&2
+		fail "assert_line_order failed"
+	fi
+}
+
+assert_line_count() {
+	local expected="$1"
+	local pattern="$2"
+	local file="$3"
+	local actual
+
+	actual=$(grep -c -- "$pattern" "$file" || true)
+	if [[ "$actual" -ne "$expected" ]]; then
+		printf "Expected %s occurrence(s) of '%s' in %s, got %s\n" "$expected" "$pattern" "$file" "$actual" >&2
+		cat "$file" >&2
+		fail "assert_line_count failed"
 	fi
 }
 
@@ -118,6 +149,81 @@ test_status() {
 	assert_grep "Base    : .*main" "$TMP_ROOT/status.out"
 	assert_grep "Features: .*feature/a" "$TMP_ROOT/status.out"
 
+	"$GIT_LM" push demo > "$TMP_ROOT/status-initial-push.out" 2>&1
+	assert_grep "Summary" "$TMP_ROOT/status-initial-push.out"
+
+	git push -q origin --delete feature/a
+	git fetch -q origin --prune
+	local red_feature
+	red_feature=$(printf '\033\\[31mfeature/a')
+
+	"$GIT_LM" status demo > "$TMP_ROOT/status-missing-remote.out" 2>&1
+	assert_grep "Features: .*feature/a" "$TMP_ROOT/status-missing-remote.out"
+	assert_grep "missing on origin: feature/a" "$TMP_ROOT/status-missing-remote.out"
+	assert_not_grep "Task 'light-merge/demo'" "$TMP_ROOT/status-missing-remote.out"
+	assert_grep "$red_feature" "$TMP_ROOT/status-missing-remote.out"
+
+	"$GIT_LM" list > "$TMP_ROOT/list-missing-remote.out" 2>&1
+	assert_grep "light-merge/demo" "$TMP_ROOT/list-missing-remote.out"
+	assert_grep "light-merge/demo.*synced:" "$TMP_ROOT/list-missing-remote.out"
+	assert_grep "missing on origin: feature/a" "$TMP_ROOT/list-missing-remote.out"
+	assert_not_grep "Task 'light-merge/demo'" "$TMP_ROOT/list-missing-remote.out"
+	assert_grep "$red_feature" "$TMP_ROOT/list-missing-remote.out"
+
+	if "$GIT_LM" push demo > "$TMP_ROOT/push-missing-local.out" 2>&1; then
+		fail "push with missing local feature unexpectedly succeeded"
+	fi
+	assert_grep "Summary" "$TMP_ROOT/push-missing-local.out"
+	assert_grep "Cannot push" "$TMP_ROOT/push-missing-local.out"
+	assert_grep "missing on origin: feature/a" "$TMP_ROOT/push-missing-local.out"
+
+	add_feature_branch "feature/b"
+	git push -q origin feature/b
+	"$GIT_LM" create demo feature/b --base main > "$TMP_ROOT/success-missing-remote.out" 2>&1
+	assert_grep "remote:" "$TMP_ROOT/success-missing-remote.out"
+	assert_grep "features: .*feature/a" "$TMP_ROOT/success-missing-remote.out"
+	assert_grep "missing on origin: feature/a" "$TMP_ROOT/success-missing-remote.out"
+	assert_line_order "remote:" "Warning: missing on origin: feature/a" "$TMP_ROOT/success-missing-remote.out"
+
+	if "$GIT_LM" pull demo > "$TMP_ROOT/pull-missing-remote.out" 2>&1; then
+		fail "pull with missing remote feature unexpectedly succeeded"
+	fi
+	assert_grep "Summary" "$TMP_ROOT/pull-missing-remote.out"
+	assert_grep "Cannot pull" "$TMP_ROOT/pull-missing-remote.out"
+	assert_grep "missing on origin: feature/a" "$TMP_ROOT/pull-missing-remote.out"
+
+	"$GIT_LM" status demo > "$TMP_ROOT/status-inconsistent-missing-remote.out" 2>&1
+	assert_line_order "local:" "remote:" "$TMP_ROOT/status-inconsistent-missing-remote.out"
+	assert_line_order "remote:" "Warning: missing on origin: feature/a" "$TMP_ROOT/status-inconsistent-missing-remote.out"
+
+	"$GIT_LM" list > "$TMP_ROOT/list-inconsistent-missing-remote.out" 2>&1
+	assert_line_order "local:" "remote:" "$TMP_ROOT/list-inconsistent-missing-remote.out"
+	assert_line_order "remote:" "Warning: missing on origin: feature/a" "$TMP_ROOT/list-inconsistent-missing-remote.out"
+	assert_not_grep "light-merge/demo.*local:" "$TMP_ROOT/list-inconsistent-missing-remote.out"
+	assert_grep "^      features: .*feature/b" "$TMP_ROOT/list-inconsistent-missing-remote.out"
+	assert_grep "^      features: .*feature/a" "$TMP_ROOT/list-inconsistent-missing-remote.out"
+
+	git checkout -q main
+	git branch -D light-merge/demo >/dev/null 2>&1
+	if "$GIT_LM" sync demo > "$TMP_ROOT/sync-missing-remote.out" 2>&1; then
+		fail "sync with missing remote feature unexpectedly succeeded"
+	fi
+	assert_grep "remote-only" "$TMP_ROOT/sync-missing-remote.out"
+	assert_grep "Cannot pull" "$TMP_ROOT/sync-missing-remote.out"
+	assert_grep "missing on origin: feature/a" "$TMP_ROOT/sync-missing-remote.out"
+
+	add_feature_branch "feature/c-long-name"
+	git push -q origin feature/c-long-name
+	add_feature_branch "feature/d-long-name"
+	git push -q origin feature/d-long-name
+	"$GIT_LM" create wrap feature/b feature/c-long-name feature/d-long-name --base main > "$TMP_ROOT/wrap-create.out" 2>&1
+	GIT_LM_WRAP_WIDTH=60 "$GIT_LM" list > "$TMP_ROOT/wrap-narrow.out" 2>&1
+	GIT_LM_WRAP_WIDTH=200 "$GIT_LM" list > "$TMP_ROOT/wrap-wide.out" 2>&1
+	GIT_LM_WRAP_WIDTH=10 "$GIT_LM" list > "$TMP_ROOT/wrap-disabled.out" 2>&1
+	assert_grep "^              .*feature/" "$TMP_ROOT/wrap-narrow.out"
+	assert_line_count 0 "^              .*feature/" "$TMP_ROOT/wrap-wide.out"
+	assert_line_count 0 "^              .*feature/" "$TMP_ROOT/wrap-disabled.out"
+
 	printf "status tests passed.\n"
 }
 
@@ -134,10 +240,14 @@ test_sync() {
 	"$GIT_LM" create demo feature/a --base main > "$TMP_ROOT/sync-create.out" 2>&1
 	"$GIT_LM" sync demo > "$TMP_ROOT/sync-local-only.out" 2>&1
 	assert_grep "local-only" "$TMP_ROOT/sync-local-only.out"
+	assert_grep "Summary" "$TMP_ROOT/sync-local-only.out"
+	assert_grep "Target: .*light-merge/demo" "$TMP_ROOT/sync-local-only.out"
 
 	git fetch -q origin
 	"$GIT_LM" sync demo > "$TMP_ROOT/sync-up-to-date.out" 2>&1
 	assert_grep "already in sync" "$TMP_ROOT/sync-up-to-date.out"
+	assert_grep "Summary" "$TMP_ROOT/sync-up-to-date.out"
+	assert_grep "Target: .*light-merge/demo" "$TMP_ROOT/sync-up-to-date.out"
 
 	printf "sync tests passed.\n"
 }

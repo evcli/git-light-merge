@@ -47,6 +47,160 @@ log_info() { printf "\e[32m%b\e[0m\n" "$*" >&2; }
 log_warn() { printf "\e[33m%b\e[0m\n" "$*" >&2; }
 log_err()  { printf "\e[31m%b\e[0m\n" "$*" >&2; }
 
+format_feature_list() {
+    local features="$1"
+    local formatted_var="$2"
+    local feature_array=()
+    local formatted=""
+    local f
+
+    read -ra feature_array <<< "$features"
+    for f in "${feature_array[@]}"; do
+        [[ -n "$formatted" ]] && formatted+=" "
+        if list_feature_has_origin_ref "$f"; then
+            formatted+="\e[32m${f}\e[0m"
+        else
+            formatted+="\e[31m${f}\e[0m"
+        fi
+    done
+
+    printf -v "$formatted_var" "%s" "$formatted"
+}
+
+print_features_line() {
+    local features="$1"
+    local formatted_features=""
+
+    format_feature_list "$features" formatted_features
+    printf "Features: %b\n" "$formatted_features"
+}
+
+format_feature() {
+    local feature="$1"
+    local formatted_var="$2"
+
+    if list_feature_has_origin_ref "$feature"; then
+        printf -v "$formatted_var" "%s" "\e[32m${feature}\e[0m"
+    else
+        printf -v "$formatted_var" "%s" "\e[31m${feature}\e[0m"
+    fi
+}
+
+detect_output_width() {
+    local width="${GIT_LM_WRAP_WIDTH:-}"
+
+    if [[ ! "$width" =~ ^[0-9]+$ ]]; then
+        width="${COLUMNS:-}"
+    fi
+
+    if [[ ! "$width" =~ ^[0-9]+$ ]] && command -v tput >/dev/null 2>&1; then
+        width=$(tput cols 2>/dev/null || true)
+    fi
+
+    if [[ ! "$width" =~ ^[0-9]+$ && -r /dev/tty ]]; then
+        local rows=""
+        local cols=""
+        read -r rows cols < <(stty size </dev/tty 2>/dev/null || true)
+        width="$cols"
+    fi
+
+    if [[ ! "$width" =~ ^[0-9]+$ || $width -lt 20 ]]; then
+        return 1
+    fi
+
+    printf "%s" "$width"
+}
+
+print_wrapped_features_line() {
+    local indent="$1"
+    local features="$2"
+    local feature_array=()
+    local max_width
+    local prefix="${indent}features: "
+    local continuation="${indent}          "
+    local current="$prefix"
+    local current_raw_len=${#prefix}
+    local has_word=0
+    local f
+
+    read -ra feature_array <<< "$features"
+    [[ ${#feature_array[@]} -eq 0 ]] && return 0
+
+    if ! max_width=$(detect_output_width); then
+        local formatted_features=""
+        format_feature_list "$features" formatted_features
+        printf "%b%b\n" "$prefix" "$formatted_features"
+        return 0
+    fi
+
+    for f in "${feature_array[@]}"; do
+        local formatted_feature=""
+        local separator=""
+        local separator_len=0
+        format_feature "$f" formatted_feature
+
+        if [[ $has_word -eq 1 ]]; then
+            separator=" "
+            separator_len=1
+        fi
+
+        if [[ $has_word -eq 1 && $((current_raw_len + separator_len + ${#f})) -gt $max_width ]]; then
+            printf "%b\n" "$current"
+            current="$continuation$formatted_feature"
+            current_raw_len=$(( ${#continuation} + ${#f} ))
+        else
+            current+="$separator$formatted_feature"
+            current_raw_len=$((current_raw_len + separator_len + ${#f}))
+        fi
+        has_word=1
+    done
+
+    printf "%b\n" "$current"
+}
+
+print_summary_state_line() {
+    local indent="$1"
+    local leading="$2"
+    local label="$3"
+    local info="$4"
+    local base="$5"
+    local features="$6"
+    local features_indent="${7:-$indent}"
+
+    local label_color=""
+    local label_text=""
+    if [[ "$label" == "local" ]]; then
+        label_color="\e[36m"
+        label_text="local:  "
+    elif [[ "$label" == "synced" ]]; then
+        label_color="\e[32m"
+        label_text="synced:"
+    else
+        label_color="\e[34m"
+        label_text="remote: "
+    fi
+
+    local line_prefix="$indent"
+    if [[ -n "$leading" ]]; then
+        line_prefix="$leading"
+    fi
+
+    local info_formatted=""
+    if [[ -n "$info" ]]; then
+        info_formatted=$(printf "\e[90m%-35s\e[0m" "$info")
+    else
+        info_formatted=$(printf "%-35s" "")
+    fi
+
+    local base_formatted=""
+    if [[ -n "$base" ]]; then
+        base_formatted="[\e[1;36m${base}\e[0m]"
+    fi
+
+    printf "%b%b%s\e[0m %b %b\n" "$line_prefix" "$label_color" "$label_text" "$info_formatted" "$base_formatted"
+    print_wrapped_features_line "$features_indent" "$features"
+}
+
 format_state_line() {
     local indent="$1"
     local label="$2"
@@ -81,7 +235,9 @@ format_state_line() {
     
     local features_formatted=""
     if [[ -n "$features" ]]; then
-        features_formatted="(\e[32m${features}\e[0m)"
+        local formatted_features=""
+        format_feature_list "$features" formatted_features
+        features_formatted="(${formatted_features})"
     fi
     
     printf "%s%b%s\e[0m %b %b %b\n" "$indent" "$label_color" "$label_text" "$info_formatted" "$base_formatted" "$features_formatted"
@@ -220,25 +376,220 @@ load_origin_ref_cache() {
     done <<< "$origin_refs"
 }
 
-validate_list_state_features() {
-    local task="$1"
-    local features="$2"
-    local missing=()
+get_missing_origin_features() {
+    local features="$1"
+    local missing_var="$2"
+    local missing_features=()
     local feature_array=()
     local f
 
     read -ra feature_array <<< "$features"
     for f in "${feature_array[@]}"; do
         if ! list_feature_has_origin_ref "$f"; then
-            missing+=("$f")
+            missing_features+=("$f")
         fi
     done
 
-    if [[ ${#missing[@]} -gt 0 ]]; then
-        log_err "Error: Task '$task' contains local-only feature(s): ${missing[*]}"
-        log_err "Push them to origin first, then run 'git fetch origin' and try again."
+    printf -v "$missing_var" "%s" "${missing_features[*]}"
+}
+
+warn_missing_origin_features() {
+    local indent="$1"
+    local _task="$2"
+    local features="$3"
+    local missing=""
+
+    get_missing_origin_features "$features" missing
+    if [[ -n "$missing" ]]; then
+        log_warn "${indent}Warning: missing on origin: $missing"
+    fi
+}
+
+warn_missing_origin_feature_sets() {
+    local indent="$1"
+    shift
+    local combined_features=""
+    local seen_features=()
+    local feature_array=()
+    local features
+    local f
+    local seen
+
+    for features in "$@"; do
+        read -ra feature_array <<< "$features"
+        for f in "${feature_array[@]}"; do
+            seen=0
+            local existing
+            for existing in "${seen_features[@]}"; do
+                if [[ "$existing" == "$f" ]]; then
+                    seen=1
+                    break
+                fi
+            done
+            if [[ $seen -eq 0 ]]; then
+                seen_features+=("$f")
+                [[ -n "$combined_features" ]] && combined_features+=" "
+                combined_features+="$f"
+            fi
+        done
+    done
+
+    warn_missing_origin_features "$indent" "" "$combined_features"
+}
+
+get_lm_state_features_for_side() {
+    local full_branch="$1"
+    local side="$2"
+    local features_var="$3"
+    local ref=""
+    local subject=""
+    local state_base=""
+    local state_features=""
+
+    if [[ "$side" == "local" ]]; then
+        if load_pending_state "$full_branch"; then
+            printf -v "$features_var" "%s" "${LM_FEATURES[*]}"
+            return 0
+        fi
+        ref="refs/heads/$full_branch"
+    else
+        ref="refs/remotes/origin/$full_branch"
+    fi
+
+    if ! git show-ref --verify -q "$ref" 2>/dev/null; then
         return 1
     fi
+
+    subject=$(git log -1 --format=%s "$ref" 2>/dev/null || true)
+    if parse_lm_state_subject "$subject" state_base state_features; then
+        printf -v "$features_var" "%s" "$state_features"
+        return 0
+    fi
+
+    return 1
+}
+
+get_missing_origin_features_for_side() {
+    local full_branch="$1"
+    local side="$2"
+    local missing_var="$3"
+    local side_features=""
+    local side_missing=""
+
+    printf -v "$missing_var" "%s" ""
+    get_lm_state_features_for_side "$full_branch" "$side" side_features || return 0
+    get_missing_origin_features "$side_features" side_missing
+    printf -v "$missing_var" "%s" "$side_missing"
+}
+
+guard_lm_state_has_no_missing_origin_features() {
+    local full_branch="$1"
+    local side="$2"
+    local action="$3"
+    local missing=""
+
+    load_origin_ref_cache
+    get_missing_origin_features_for_side "$full_branch" "$side" missing
+    if [[ -n "$missing" ]]; then
+        print_lm_task_summary_block "Summary" "$full_branch"
+        log_err "Error: Cannot $action: $side light-merge state references feature branch(es) missing on origin: $missing"
+        return 1
+    fi
+}
+
+print_lm_task_summary_lines() {
+    local indent="$1"
+    local full_branch="$2"
+    local leading="${3:-}"
+    local local_ref="refs/heads/$full_branch"
+    local remote_ref="refs/remotes/origin/$full_branch"
+
+    local has_local=0
+    local has_remote=0
+    local local_sha=""
+    local remote_sha=""
+    local local_info=""
+    local remote_info=""
+    local local_base=""
+    local remote_base=""
+    local local_features=""
+    local remote_features=""
+
+    local refs
+    refs=$(git for-each-ref --format='%(refname)|%(objectname)|%(authorname)|%(authordate:relative)|%(contents:subject)' "$local_ref" "$remote_ref" 2>/dev/null || true)
+    local ref sha author rel_time subject
+    while IFS='|' read -r ref sha author rel_time subject; do
+        [[ -z "$ref" ]] && continue
+        local state_base=""
+        local state_features=""
+        parse_lm_state_subject "$subject" state_base state_features || true
+
+        if [[ "$ref" == "$local_ref" ]]; then
+            has_local=1
+            local_sha="$sha"
+            [[ -n "$author" || -n "$rel_time" ]] && local_info="$rel_time by $author"
+            local_base="$state_base"
+            local_features="$state_features"
+        elif [[ "$ref" == "$remote_ref" ]]; then
+            has_remote=1
+            remote_sha="$sha"
+            [[ -n "$author" || -n "$rel_time" ]] && remote_info="$rel_time by $author"
+            remote_base="$state_base"
+            remote_features="$state_features"
+        fi
+    done <<< "$refs"
+
+    if [[ $has_local -eq 1 ]] && load_pending_state "$full_branch"; then
+        local_base="$LM_BASE"
+        local_features="${LM_FEATURES[*]}"
+        [[ -n "$local_info" ]] || local_info=$(get_commit_info_str "$local_ref")
+    fi
+
+    if [[ $has_local -eq 0 && $has_remote -eq 0 ]]; then
+        return 1
+    fi
+
+    if [[ $has_local -eq 1 && $has_remote -eq 1 && "$local_sha" == "$remote_sha" ]]; then
+        local info_str="${local_info:-$remote_info}"
+        local synced_base="${local_base:-$remote_base}"
+        local synced_features="${local_features:-$remote_features}"
+        print_summary_state_line "$indent" "$leading" "synced" "$info_str" "$synced_base" "$synced_features"
+        warn_missing_origin_feature_sets "$indent" "$synced_features"
+        return 0
+    fi
+
+    local features_indent="$indent"
+    if [[ $has_local -eq 1 && $has_remote -eq 1 ]]; then
+        if [[ -n "$leading" ]]; then
+            printf "%b\n" "$leading"
+        fi
+        leading=""
+        features_indent="${indent}  "
+    fi
+
+    local first_leading="$leading"
+    if [[ $has_local -eq 1 ]]; then
+        print_summary_state_line "$indent" "$first_leading" "local" "$local_info" "$local_base" "$local_features" "$features_indent"
+        first_leading=""
+    fi
+
+    if [[ $has_remote -eq 1 ]]; then
+        print_summary_state_line "$indent" "$first_leading" "remote" "$remote_info" "$remote_base" "$remote_features" "$features_indent"
+    fi
+
+    warn_missing_origin_feature_sets "$indent" "$local_features" "$remote_features"
+}
+
+print_lm_task_summary_block() {
+    local title="$1"
+    local target_branch="$2"
+
+    printf "\e[90m========================================\e[0m\n" >&2
+    [[ -n "$title" ]] && printf "\e[1;32m%s\e[0m\n" "$title" >&2
+    printf "Target: \e[1;33m%s\e[0m\n" "$target_branch" >&2
+    load_origin_ref_cache
+    print_lm_task_summary_lines "" "$target_branch" >&2
+    printf "\e[90m========================================\e[0m\n" >&2
 }
 
 get_pending_state_values() {
@@ -272,52 +623,10 @@ get_pending_state_values() {
 
 print_merge_success_summary() {
     local target_branch="$1"
-    local base="$2"
-    local features="$3"
-    local local_ref="refs/heads/$target_branch"
-    local remote_ref="refs/remotes/origin/$target_branch"
+    local _base="$2"
+    local _features="$3"
 
-    local local_sha=""
-    local remote_sha=""
-    local local_info=""
-    local remote_info=""
-    local remote_base=""
-    local remote_features=""
-
-    local refs
-    refs=$(git for-each-ref --format='%(refname)|%(objectname)|%(authorname)|%(authordate:relative)|%(contents:subject)' "$local_ref" "$remote_ref" 2>/dev/null || true)
-    local ref sha author rel_time subject
-    while IFS='|' read -r ref sha author rel_time subject; do
-        [[ -z "$ref" ]] && continue
-        if [[ "$ref" == "$local_ref" ]]; then
-            local_sha="$sha"
-            [[ -n "$author" || -n "$rel_time" ]] && local_info="$rel_time by $author"
-        elif [[ "$ref" == "$remote_ref" ]]; then
-            remote_sha="$sha"
-            [[ -n "$author" || -n "$rel_time" ]] && remote_info="$rel_time by $author"
-            parse_lm_state_subject "$subject" remote_base remote_features || true
-        fi
-    done <<< "$refs"
-
-    printf "\e[90m========================================\e[0m\n" >&2
-    printf "\e[1;32mSuccess!\e[0m\n" >&2
-    printf "Target: \e[1;33m%s\e[0m\n" "$target_branch" >&2
-    format_state_line "" "local" "$local_info" "$base" "$features" >&2
-
-    if [[ -n "$remote_sha" ]]; then
-        if [[ -n "$remote_base" ]]; then
-            load_origin_ref_cache
-            validate_list_state_features "origin/$target_branch" "$remote_features" || exit 1
-        fi
-        format_state_line "" "remote" "$remote_info" "$remote_base" "$remote_features" >&2
-
-        if [[ "$local_sha" != "$remote_sha" ]]; then
-            printf "        \e[1;33m(Local is ahead/inconsistent. Run 'git lm push' or 'git lm sync' to update remote)\e[0m\n" >&2
-        fi
-    else
-        printf "remote: \e[90m(local-only)\e[0m\n" >&2
-    fi
-    printf "\e[90m========================================\e[0m\n" >&2
+    print_lm_task_summary_block "Success!" "$target_branch"
 }
 
 get_current_branch() {
@@ -687,22 +996,24 @@ status_cmd() {
             [[ -n "$local_info" ]] || local_info=$(get_commit_info_str "$local_ref")
         fi
         if [[ -n "$local_base" ]]; then
-            validate_list_state_features "$full_name" "$local_features" || return 1
             printf "Branch  : \e[1;33m%s\e[0m\n" "$full_name"
             printf "Base    : \e[1;36m%s\e[0m\n" "$local_base"
-            printf "Features: \e[32m%s\e[0m\n" "$local_features"
+            print_features_line "$local_features"
             [[ ${#LM_PENDING[@]} -gt 0 ]] && log_warn "Pending : ${LM_PENDING[*]}"
             [[ -n "$local_info" ]] && printf "Commit  : Local [\e[90m%s\e[0m]\n" "$local_info"
+            if [[ $has_remote -eq 0 ]]; then
+                warn_missing_origin_feature_sets "" "$local_features"
+            fi
         else
             log_err "Error: No local state found for $full_name"
         fi
     elif [[ $has_remote -eq 1 ]]; then
         if [[ -n "$remote_base" ]]; then
-            validate_list_state_features "origin/$full_name" "$remote_features" || return 1
             printf "Branch  : \e[1;34morigin/%s\e[0m (remote-only)\n" "$name"
             printf "Base    : \e[1;36m%s\e[0m\n" "$remote_base"
-            printf "Features: \e[32m%s\e[0m\n" "$remote_features"
+            print_features_line "$remote_features"
             [[ -n "$remote_info" ]] && printf "Commit  : Remote [\e[90m%s\e[0m]\n" "$remote_info"
+            warn_missing_origin_feature_sets "" "$remote_features"
         else
             log_err "Error: No remote state found for $full_name"
         fi
@@ -715,13 +1026,13 @@ status_cmd() {
     if [[ $has_local -eq 1 && $has_remote -eq 1 ]]; then
         if [[ "$local_sha" == "$remote_sha" ]]; then
             printf "Sync    : \e[1;32mUp-to-date with origin\e[0m\n"
+            warn_missing_origin_feature_sets "" "$local_features" "$remote_features"
         else
             log_warn "Sync    : Inconsistent with remote!"
 
-            validate_list_state_features "$full_name" "$local_features" || return 1
-            validate_list_state_features "origin/$full_name" "$remote_features" || return 1
             format_state_line "          " "local" "$local_info" "$local_base" "$local_features"
             format_state_line "          " "remote" "$remote_info" "$remote_base" "$remote_features"
+            warn_missing_origin_feature_sets "          " "$local_features" "$remote_features"
 
             if [[ "$local_time" -gt "$remote_time" ]]; then
                 log_info "          (Local is newer. Run 'git lm push' to push or 'git lm sync' to sync)"
@@ -821,6 +1132,8 @@ push_cmd() {
         log_err "Error: Local branch '$full_name' does not exist."
         return 1
     fi
+
+    guard_lm_state_has_no_missing_origin_features "$full_name" "local" "push" || return 1
     
     # Check if remote branch exists. If so, delete it first.
     local remote_ref="refs/remotes/origin/$full_name"
@@ -831,6 +1144,8 @@ push_cmd() {
     
     log_info "Pushing local branch '$full_name' to origin..."
     git push origin "$full_name:$full_name"
+    git fetch -q origin "$full_name:refs/remotes/origin/$full_name" >/dev/null 2>&1 || true
+    print_lm_task_summary_block "Summary" "$full_name"
 }
 
 pull_cmd() {
@@ -843,6 +1158,8 @@ pull_cmd() {
         log_err "Error: Remote branch 'origin/$full_name' does not exist."
         return 1
     fi
+
+    guard_lm_state_has_no_missing_origin_features "$full_name" "remote" "pull" || return 1
     
     local local_ref="refs/heads/$full_name"
     if ! git show-ref --verify -q "$local_ref" 2>/dev/null; then
@@ -857,6 +1174,8 @@ pull_cmd() {
             git branch -f "$full_name" "origin/$full_name"
         fi
     fi
+
+    print_lm_task_summary_block "Summary" "$full_name"
 }
 
 sync_cmd() {
@@ -910,6 +1229,13 @@ sync_cmd() {
     # Both exist. Exact same commit means already synced; otherwise newest LM-generated commit wins.
     if [[ "$local_sha" == "$remote_sha" ]]; then
         log_info "Task '$full_name' is already in sync with remote."
+        if ! guard_lm_state_has_no_missing_origin_features "$full_name" "local" "sync"; then
+            return 1
+        fi
+        if ! guard_lm_state_has_no_missing_origin_features "$full_name" "remote" "sync"; then
+            return 1
+        fi
+        print_lm_task_summary_block "Summary" "$full_name"
         return 0
     fi
 
@@ -1354,57 +1680,9 @@ list_cmd() {
         else
             task_header="\e[1;33m${task_name}\e[0m (${type_color}${task_type}\e[0m)"
         fi
-        printf "%b %b\n" "$prefix" "$task_header"
+        local summary_leading="${prefix} ${task_header} "
 
-        local local_ref="refs/heads/$local_branch"
-        local remote_ref="refs/remotes/origin/$remote_branch"
-
-        if [[ -n "$local_branch" && -n "$remote_branch" && "${LM_LIST_SHA_CACHE[$local_ref]:-}" == "${LM_LIST_SHA_CACHE[$remote_ref]:-}" ]]; then
-            local info_str="${LM_LIST_INFO_CACHE[$local_ref]:-${LM_LIST_INFO_CACHE[$remote_ref]:-}}"
-            local synced_base=""
-            local synced_features=""
-
-            if get_pending_state_values "$local_branch" synced_base synced_features; then
-                :
-            else
-                synced_base="${LM_LIST_BASE_CACHE[$local_ref]:-${LM_LIST_BASE_CACHE[$remote_ref]:-}}"
-                synced_features="${LM_LIST_FEATURES_CACHE[$local_ref]:-${LM_LIST_FEATURES_CACHE[$remote_ref]:-}}"
-            fi
-            validate_list_state_features "$local_branch" "$synced_features" || return 1
-
-            format_state_line "    " "synced" "$info_str" "$synced_base" "$synced_features"
-            continue
-        fi
-        
-        # Local branch details
-        if [[ -n "$local_branch" ]]; then
-            local info_str="${LM_LIST_INFO_CACHE[$local_ref]:-}"
-            local local_base=""
-            local local_features=""
-            
-            if get_pending_state_values "$local_branch" local_base local_features; then
-                :
-            else
-                local_base="${LM_LIST_BASE_CACHE[$local_ref]:-}"
-                local_features="${LM_LIST_FEATURES_CACHE[$local_ref]:-}"
-            fi
-            validate_list_state_features "$local_branch" "$local_features" || return 1
-            
-            format_state_line "    " "local" "$info_str" "$local_base" "$local_features"
-        fi
-        
-        # Remote branch details
-        if [[ -n "$remote_branch" ]]; then
-            local info_str="${LM_LIST_INFO_CACHE[$remote_ref]:-}"
-            local remote_base=""
-            local remote_features=""
-            
-            remote_base="${LM_LIST_BASE_CACHE[$remote_ref]:-}"
-            remote_features="${LM_LIST_FEATURES_CACHE[$remote_ref]:-}"
-            validate_list_state_features "origin/$remote_branch" "$remote_features" || return 1
-            
-            format_state_line "    " "remote" "$info_str" "$remote_base" "$remote_features"
-        fi
+        print_lm_task_summary_lines "    " "$task_name" "$summary_leading"
     done
 }
 
