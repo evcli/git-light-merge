@@ -47,9 +47,42 @@ log_info() { printf "\e[32m%b\e[0m\n" "$*" >&2; }
 log_warn() { printf "\e[33m%b\e[0m\n" "$*" >&2; }
 log_err()  { printf "\e[31m%b\e[0m\n" "$*" >&2; }
 
+feature_list_contains() {
+    local features="$1"
+    local target="$2"
+    local feature_array=()
+    local feature
+
+    read -ra feature_array <<< "$features"
+    for feature in "${feature_array[@]}"; do
+        [[ "$feature" == "$target" ]] && return 0
+    done
+
+    return 1
+}
+
+get_feature_difference() {
+    local features="$1"
+    local compared_features="$2"
+    local difference_var="$3"
+    local feature_array=()
+    local differences=()
+    local feature
+
+    read -ra feature_array <<< "$features"
+    for feature in "${feature_array[@]}"; do
+        if ! feature_list_contains "$compared_features" "$feature"; then
+            differences+=("$feature")
+        fi
+    done
+
+    printf -v "$difference_var" "%s" "${differences[*]}"
+}
+
 format_feature_list() {
     local features="$1"
     local formatted_var="$2"
+    local difference_features="${3:-}"
     local feature_array=()
     local formatted=""
     local f
@@ -57,11 +90,9 @@ format_feature_list() {
     read -ra feature_array <<< "$features"
     for f in "${feature_array[@]}"; do
         [[ -n "$formatted" ]] && formatted+=" "
-        if list_feature_has_origin_ref "$f"; then
-            formatted+="\e[32m${f}\e[0m"
-        else
-            formatted+="\e[31m${f}\e[0m"
-        fi
+        local formatted_feature=""
+        format_feature "$f" formatted_feature "$difference_features"
+        formatted+="$formatted_feature"
     done
 
     printf -v "$formatted_var" "%s" "$formatted"
@@ -78,11 +109,14 @@ print_features_line() {
 format_feature() {
     local feature="$1"
     local formatted_var="$2"
+    local difference_features="${3:-}"
 
-    if list_feature_has_origin_ref "$feature"; then
-        printf -v "$formatted_var" "%s" "\e[32m${feature}\e[0m"
-    else
+    if ! list_feature_has_origin_ref "$feature"; then
         printf -v "$formatted_var" "%s" "\e[31m${feature}\e[0m"
+    elif feature_list_contains "$difference_features" "$feature"; then
+        printf -v "$formatted_var" "%s" "\e[35m${feature}\e[0m"
+    else
+        printf -v "$formatted_var" "%s" "\e[32m${feature}\e[0m"
     fi
 }
 
@@ -114,6 +148,7 @@ detect_output_width() {
 print_wrapped_features_line() {
     local indent="$1"
     local features="$2"
+    local difference_features="${3:-}"
     local feature_array=()
     local max_width
     local prefix="${indent}features: "
@@ -128,7 +163,7 @@ print_wrapped_features_line() {
 
     if ! max_width=$(detect_output_width); then
         local formatted_features=""
-        format_feature_list "$features" formatted_features
+        format_feature_list "$features" formatted_features "$difference_features"
         printf "%b%b\n" "$prefix" "$formatted_features"
         return 0
     fi
@@ -137,7 +172,7 @@ print_wrapped_features_line() {
         local formatted_feature=""
         local separator=""
         local separator_len=0
-        format_feature "$f" formatted_feature
+        format_feature "$f" formatted_feature "$difference_features"
 
         if [[ $has_word -eq 1 ]]; then
             separator=" "
@@ -166,6 +201,7 @@ print_summary_state_line() {
     local base="$5"
     local features="$6"
     local features_indent="${7:-$indent}"
+    local difference_features="${8:-}"
 
     local label_color=""
     local label_text=""
@@ -198,7 +234,7 @@ print_summary_state_line() {
     fi
 
     printf "%b%b%s\e[0m %b %b\n" "$line_prefix" "$label_color" "$label_text" "$info_formatted" "$base_formatted"
-    print_wrapped_features_line "$features_indent" "$features"
+    print_wrapped_features_line "$features_indent" "$features" "$difference_features"
 }
 
 format_state_line() {
@@ -207,6 +243,7 @@ format_state_line() {
     local info="$3"
     local base="$4"
     local features="$5"
+    local difference_features="${6:-}"
     
     local label_color=""
     local label_text=""
@@ -236,7 +273,7 @@ format_state_line() {
     local features_formatted=""
     if [[ -n "$features" ]]; then
         local formatted_features=""
-        format_feature_list "$features" formatted_features
+        format_feature_list "$features" formatted_features "$difference_features"
         features_formatted="(${formatted_features})"
     fi
     
@@ -558,6 +595,13 @@ print_lm_task_summary_lines() {
         return 0
     fi
 
+    local local_difference_features=""
+    local remote_difference_features=""
+    if [[ $has_local -eq 1 && $has_remote -eq 1 ]]; then
+        get_feature_difference "$local_features" "$remote_features" local_difference_features
+        get_feature_difference "$remote_features" "$local_features" remote_difference_features
+    fi
+
     local features_indent="$indent"
     if [[ $has_local -eq 1 && $has_remote -eq 1 ]]; then
         if [[ -n "$leading" ]]; then
@@ -569,12 +613,12 @@ print_lm_task_summary_lines() {
 
     local first_leading="$leading"
     if [[ $has_local -eq 1 ]]; then
-        print_summary_state_line "$indent" "$first_leading" "local" "$local_info" "$local_base" "$local_features" "$features_indent"
+        print_summary_state_line "$indent" "$first_leading" "local" "$local_info" "$local_base" "$local_features" "$features_indent" "$local_difference_features"
         first_leading=""
     fi
 
     if [[ $has_remote -eq 1 ]]; then
-        print_summary_state_line "$indent" "$first_leading" "remote" "$remote_info" "$remote_base" "$remote_features" "$features_indent"
+        print_summary_state_line "$indent" "$first_leading" "remote" "$remote_info" "$remote_base" "$remote_features" "$features_indent" "$remote_difference_features"
     fi
 
     warn_missing_origin_feature_sets "$indent" "$local_features" "$remote_features"
@@ -1030,8 +1074,12 @@ status_cmd() {
         else
             log_warn "Sync    : Inconsistent with remote!"
 
-            format_state_line "          " "local" "$local_info" "$local_base" "$local_features"
-            format_state_line "          " "remote" "$remote_info" "$remote_base" "$remote_features"
+            local local_difference_features=""
+            local remote_difference_features=""
+            get_feature_difference "$local_features" "$remote_features" local_difference_features
+            get_feature_difference "$remote_features" "$local_features" remote_difference_features
+            format_state_line "          " "local" "$local_info" "$local_base" "$local_features" "$local_difference_features"
+            format_state_line "          " "remote" "$remote_info" "$remote_base" "$remote_features" "$remote_difference_features"
             warn_missing_origin_feature_sets "          " "$local_features" "$remote_features"
 
             if [[ "$local_time" -gt "$remote_time" ]]; then
@@ -1309,11 +1357,14 @@ pick_cmd() {
         fi
     fi
 
-    # Get branches sorted by committerdate, with local/remote categorization and base excluded
+    # Collect branches by recency, with local/remote categorization and base excluded.
+    # Existing features are promoted to the front afterwards, preserving merge order.
     declare -A pick_seen=()
     declare -A pick_is_local=()
     declare -A pick_is_remote=()
+    declare -A pick_ordered=()
     local pick_order=()
+    local recent_pick_order=()
     local branch_refs
     branch_refs=$(git for-each-ref --sort=-committerdate --format='%(refname)|%(refname:short)' refs/heads refs/remotes/origin 2>/dev/null || true)
     local ref short branch
@@ -1333,9 +1384,24 @@ pick_cmd() {
         [[ -z "$branch" || "$branch" == "$base" || "$branch" == "$LM_PREFIX"* ]] && continue
         if [[ -z "${pick_seen[$branch]:-}" ]]; then
             pick_seen["$branch"]=1
-            pick_order+=("$branch")
+            recent_pick_order+=("$branch")
         fi
     done <<< "$branch_refs"
+
+    # Keep current features at the top in their saved merge order. All remaining
+    # branches retain the recency order supplied by git for-each-ref above.
+    for branch in "${existing_features[@]}"; do
+        if [[ -n "${pick_seen[$branch]:-}" && -z "${pick_ordered[$branch]:-}" ]]; then
+            pick_order+=("$branch")
+            pick_ordered["$branch"]=1
+        fi
+    done
+    for branch in "${recent_pick_order[@]}"; do
+        if [[ -z "${pick_ordered[$branch]:-}" ]]; then
+            pick_order+=("$branch")
+            pick_ordered["$branch"]=1
+        fi
+    done
 
     local branch_list=""
     for branch in "${pick_order[@]}"; do
@@ -1361,7 +1427,7 @@ pick_cmd() {
             # Join array elements by comma safely under set -u
             selected_input=$(IFS=,; echo "${existing_features[*]}")
         fi
-        if ! selected=$(echo "$branch_list" | "$GIT_LM_PICKER_PLUGIN" --header "Base branch: $base | Select branches (Space/Tab to select, Enter to confirm)" --selected "$selected_input"); then
+        if ! selected=$(echo "$branch_list" | "$GIT_LM_PICKER_PLUGIN" --header "Base: $base | Space/Tab select | [ / ] change merge order | Enter confirm" --selected "$selected_input"); then
             log_warn "Aborted."
             exit 0
         fi
@@ -1389,11 +1455,13 @@ pick_cmd() {
         for ((i=0; i<count; i++)); do
             local branch_name="${annotated_branches[$i]%% *}"
             local checkbox="[ ]"
+            local merge_order=0
             for f in "${existing_features[@]}"; do
                 if [[ "$f" == "$branch_name" ]]; then
-                    checkbox="[x]"
+                    checkbox="[$((merge_order + 1))]"
                     break
                 fi
+                merge_order=$((merge_order + 1))
             done
             printf "  [%2d] %s %s\n" "$((i+1))" "$checkbox" "${annotated_branches[$i]}"
         done
@@ -1404,9 +1472,9 @@ pick_cmd() {
         fi
 
         if [[ ${#existing_features[@]} -gt 0 ]]; then
-            printf "\nEnter branch numbers to merge (Enter to keep checked, e.g., 1 3 5), or 'q' to quit: "
+            printf "\nEnter branch numbers in merge order (Enter keeps the numbered order, e.g., 2 1 3), or 'q' to quit: "
         else
-            printf "\nEnter branch numbers to merge (e.g., 1 3 5), or 'q' to quit: "
+            printf "\nEnter branch numbers in merge order (e.g., 1 3 5), or 'q' to quit: "
         fi
         read -r input
         if [[ "$input" == "q" ]]; then exit 0; fi

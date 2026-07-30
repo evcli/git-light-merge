@@ -59,6 +59,7 @@ exec < /dev/tty
 filter=""
 filtered_indices=()
 selected_indices=()
+declare -A selected_orders=()
 
 # Pre-populate selected_indices if --selected is provided
 if [[ -n "$selected_input" ]]; then
@@ -86,26 +87,17 @@ lines_drawn=0
 filter_items() {
     local query="$1"
     filtered_indices=()
-    
-    # Save and set case-insensitive glob/regex matching (fully compatible with Bash 3.2+)
-    local orig_nocasematch
-    orig_nocasematch=$(shopt -p nocasematch 2>/dev/null || echo "")
-    shopt -s nocasematch
-    
+
     for i in "${!branches[@]}"; do
         local item="${branches[i]}"
         if [[ -z "$query" || "$item" == *"$query"* ]]; then
             filtered_indices+=("$i")
         fi
     done
-    
-    # Restore original case-match settings
-    if [[ -n "$orig_nocasematch" ]]; then
-        eval "$orig_nocasematch"
-    else
-        shopt -u nocasematch
-    fi
 }
+
+# Search is always case-insensitive for the lifetime of this short-lived process.
+shopt -s nocasematch
 
 # Initial filter run
 filter_items ""
@@ -115,33 +107,39 @@ filter_items ""
 read_key() {
     local key
     if ! IFS= read -rsn1 key; then
-        echo "ENTER"
+        action="ENTER"
         return
     fi
 
     if [[ "$key" == $'\e' ]]; then
         local next_chars=""
-        # Read the next 2 characters of the escape sequence using a safe 1-second integer timeout.
-        # This returns INSTANTLY (0 delay) for arrow keys as the bytes arrive together.
-        if IFS= read -rsn2 -t 1 next_chars 2>/dev/null; then
+        # Wait briefly for the remainder of an arrow-key sequence. A long wait
+        # makes a standalone ESC appear unresponsive in IDE terminals.
+        if IFS= read -rsn2 -t 0.5 next_chars 2>/dev/null; then
             case "$next_chars" in
-                '[A'|'OA') echo "UP" ;;
-                '[B'|'OB') echo "DOWN" ;;
-                *) echo "ESC" ;;
+                '[A'|'OA') action="UP" ;;
+                '[B'|'OB') action="DOWN" ;;
+                *) action="ESC" ;;
             esac
         else
-            echo "ESC"
+            action="ESC"
         fi
     elif [[ "$key" == $'\x7f' || "$key" == $'\x08' ]]; then
-        echo "BACKSPACE"
+        action="BACKSPACE"
+    elif [[ "$key" == $'\x18' ]]; then
+        action="QUIT"
     elif [[ "$key" == $'\t' ]]; then
-        echo "TAB"
+        action="TAB"
     elif [[ -z "$key" ]]; then
-        echo "ENTER"
+        action="ENTER"
     elif [[ "$key" == " " ]]; then
-        echo "SPACE"
+        action="SPACE"
+    elif [[ "$key" == "[" ]]; then
+        action="MOVE_EARLIER"
+    elif [[ "$key" == "]" ]]; then
+        action="MOVE_LATER"
     else
-        echo "CHAR:$key"
+        action="CHAR:$key"
     fi
 }
 
@@ -165,6 +163,29 @@ toggle_selection() {
             selected_indices+=("$idx")
         done
     fi
+}
+
+# Move the selected item at the cursor earlier (-1) or later (+1) in merge order.
+move_selection() {
+    local direction="$1"
+    local real_idx=${filtered_indices[cursor_idx]}
+    local i
+    local target
+    local temporary
+
+    for i in "${!selected_indices[@]}"; do
+        if (( selected_indices[i] == real_idx )); then
+            target=$((i + direction))
+            if (( target >= 0 && target < ${#selected_indices[@]} )); then
+                temporary="${selected_indices[i]}"
+                selected_indices[i]="${selected_indices[target]}"
+                selected_indices[target]="$temporary"
+            fi
+            return 0
+        fi
+    done
+
+    return 1
 }
 
 # Clean terminal state upon exit/abort
@@ -220,20 +241,22 @@ while true; do
             scroll_top=$(( cursor_idx - view_height + 1 ))
         fi
 
+        # Cache merge-order lookups once per redraw rather than scanning the
+        # selected array for every visible item.
+        selected_orders=()
+        for i in "${!selected_indices[@]}"; do
+            selected_orders["${selected_indices[i]}"]=$((i + 1))
+        done
+
         # Draw matching items in the viewport
         for (( i=0; i<view_height; i++ )); do
             idx=$(( scroll_top + i ))
             real_idx=${filtered_indices[idx]}
             item_text="${branches[real_idx]}"
             
-            # Check if this item is selected
             is_selected=0
-            for s_idx in "${selected_indices[@]}"; do
-                if (( s_idx == real_idx )); then
-                    is_selected=1
-                    break
-                fi
-            done
+            merge_order="${selected_orders[$real_idx]:-}"
+            [[ -n "$merge_order" ]] && is_selected=1
 
             cursor_prefix="  "
             if (( idx == cursor_idx )); then
@@ -244,7 +267,7 @@ while true; do
             if [[ "$single_mode" == "false" ]]; then
                 checkbox="[ ]"
                 if (( is_selected == 1 )); then
-                    checkbox="[\e[32mx\e[0m]" # Green x for selected
+                    checkbox="[\e[36m${merge_order}\e[0m]" # Cyan merge order
                 fi
                 checkbox="$checkbox " # add trailing space
             fi
@@ -261,22 +284,22 @@ while true; do
         # Render helper text at the bottom
         if [[ "$single_mode" == "true" ]]; then
             if (( total_filtered > view_height )); then
-                printf "\e[K  \e[90m-- Match %d of %d (Use ↑/↓ to navigate, Enter to select, ESC/Ctrl+C to quit) --\e[0m\n" "$((cursor_idx + 1))" "$total_filtered"
+                printf "\e[K  \e[90m-- Match %d of %d (Use ↑/↓ to navigate, Enter to select, ESC/Ctrl+X to quit) --\e[0m\n" "$((cursor_idx + 1))" "$total_filtered"
             else
-                printf "\e[K  \e[90m-- %d matches (Enter to select, ESC/Ctrl+C to quit) --\e[0m\n" "$total_filtered"
+                printf "\e[K  \e[90m-- %d matches (Enter to select, ESC/Ctrl+X to quit) --\e[0m\n" "$total_filtered"
             fi
         else
             if (( total_filtered > view_height )); then
-                printf "\e[K  \e[90m-- Match %d of %d (Use ↑/↓, Space/Tab to select, Enter to confirm, ESC/Ctrl+C to quit) --\e[0m\n" "$((cursor_idx + 1))" "$total_filtered"
+                printf "\e[K  \e[90m-- Match %d of %d (↑/↓ navigate, Space/Tab select, [/] reorder, Enter confirm, ESC/Ctrl+X quit) --\e[0m\n" "$((cursor_idx + 1))" "$total_filtered"
             else
-                printf "\e[K  \e[90m-- %d matches (Space/Tab to select, Enter to confirm, ESC/Ctrl+C to quit) --\e[0m\n" "$total_filtered"
+                printf "\e[K  \e[90m-- %d matches (Space/Tab select, [/] reorder selected, Enter confirm, ESC/Ctrl+X quit) --\e[0m\n" "$total_filtered"
             fi
         fi
         lines_drawn=$((lines_drawn + 1))
     fi
 
     # --- Read & Handle Key ---
-    action=$(read_key)
+    read_key
     
     case "$action" in
         UP)
@@ -300,6 +323,16 @@ while true; do
                 if (( total_filtered > 0 )); then
                     toggle_selection
                 fi
+            fi
+            ;;
+        MOVE_EARLIER)
+            if [[ "$single_mode" == "false" && $total_filtered -gt 0 ]]; then
+                move_selection -1 || true
+            fi
+            ;;
+        MOVE_LATER)
+            if [[ "$single_mode" == "false" && $total_filtered -gt 0 ]]; then
+                move_selection 1 || true
             fi
             ;;
         BACKSPACE)
@@ -326,7 +359,7 @@ while true; do
             fi
             break
             ;;
-        ESC)
+        ESC|QUIT)
             # Abort selection without outputting anything
             exit 1
             ;;

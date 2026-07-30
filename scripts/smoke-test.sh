@@ -195,6 +195,9 @@ test_status() {
 	"$GIT_LM" status demo > "$TMP_ROOT/status-inconsistent-missing-remote.out" 2>&1
 	assert_line_order "local:" "remote:" "$TMP_ROOT/status-inconsistent-missing-remote.out"
 	assert_line_order "remote:" "Warning: missing on origin: feature/a" "$TMP_ROOT/status-inconsistent-missing-remote.out"
+	local purple_feature
+	purple_feature=$(printf '\033\\[35mfeature/b')
+	assert_grep "$purple_feature" "$TMP_ROOT/status-inconsistent-missing-remote.out"
 
 	"$GIT_LM" list > "$TMP_ROOT/list-inconsistent-missing-remote.out" 2>&1
 	assert_line_order "local:" "remote:" "$TMP_ROOT/list-inconsistent-missing-remote.out"
@@ -202,6 +205,7 @@ test_status() {
 	assert_not_grep "light-merge/demo.*local:" "$TMP_ROOT/list-inconsistent-missing-remote.out"
 	assert_grep "^      features: .*feature/b" "$TMP_ROOT/list-inconsistent-missing-remote.out"
 	assert_grep "^      features: .*feature/a" "$TMP_ROOT/list-inconsistent-missing-remote.out"
+	assert_grep "$purple_feature" "$TMP_ROOT/list-inconsistent-missing-remote.out"
 
 	git checkout -q main
 	git branch -D light-merge/demo >/dev/null 2>&1
@@ -287,12 +291,24 @@ test_pick() {
 	"$GIT_LM" create demo feature/a --base main > "$TMP_ROOT/pick-create.out" 2>&1
 	printf '\n' | GIT_LM_PICKER_PLUGIN="$TMP_ROOT/missing-picker" "$GIT_LM" pick demo --base main > "$TMP_ROOT/pick-fallback.out" 2>&1
 
-	assert_grep "\[x\] feature/a" "$TMP_ROOT/pick-fallback.out"
+	assert_grep "\[ 1\] \[1\] feature/a" "$TMP_ROOT/pick-fallback.out"
+	assert_grep "\[ 2\] \[ \] feature/b" "$TMP_ROOT/pick-fallback.out"
 	assert_grep "feature/b \[local only\]" "$TMP_ROOT/pick-fallback.out"
 	assert_grep "Local-only branches are shown for visibility but cannot be selected" "$TMP_ROOT/pick-fallback.out"
-	assert_grep "Enter to keep checked" "$TMP_ROOT/pick-fallback.out"
+	assert_grep "Enter keeps the numbered order" "$TMP_ROOT/pick-fallback.out"
 	assert_grep "Selected features: feature/a" "$TMP_ROOT/pick-fallback.out"
 	assert_grep "Success" "$TMP_ROOT/pick-fallback.out"
+
+	add_feature_branch "feature/c"
+	git checkout -q feature/c
+	GIT_AUTHOR_DATE="2030-01-01T00:00:00Z" GIT_COMMITTER_DATE="2030-01-01T00:00:00Z" git commit -q --amend --no-edit
+	git checkout -q main
+	git push -q origin feature/c
+	printf '2 1\n' | GIT_LM_PICKER_PLUGIN="$TMP_ROOT/missing-picker" "$GIT_LM" pick demo --base main > "$TMP_ROOT/pick-reorder.out" 2>&1
+	assert_grep "\[ 1\] \[1\] feature/a" "$TMP_ROOT/pick-reorder.out"
+	assert_grep "\[ 2\] \[ \] feature/c" "$TMP_ROOT/pick-reorder.out"
+	assert_grep "Selected features: feature/c feature/a" "$TMP_ROOT/pick-reorder.out"
+	assert_grep "Success" "$TMP_ROOT/pick-reorder.out"
 
 	printf "pick tests passed.\n"
 }

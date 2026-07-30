@@ -85,7 +85,7 @@ To remove `git-light-merge` completely:
 - `git lm sync` : Sync local and remote integration tasks. If both exist and point to different commits, the newest generated commit wins; if the timestamps are identical, the command refuses to guess and asks you to choose `push` or `pull` explicitly.
 
 ### Utilities
-- `git lm pick <name> [--base branch]` : Interactively pick features using a beautiful TUI selection menu.
+- `git lm pick <name> [--base branch]` : Interactively pick features. Existing features are listed first in their current merge order; other branches follow by recency. Selected items show their merge sequence. In the TUI, use `[` and `]` to move the focused selected item earlier or later; press `ESC` or `Ctrl+X` to cancel.
 - `git lm continue|con` : Resume the merging process after resolving conflicts.
 - `git lm prune` : Clean up orphaned temporary state directories.
 
