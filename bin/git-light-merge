@@ -23,12 +23,16 @@ LM_BASE=""
 declare -a LM_FEATURES=()
 declare -a LM_PENDING=()
 declare -A LM_RESOLVED_REFS=()
+LM_RESOLVED_BASE_REF=""
 declare -A LM_LIST_SHA_CACHE=()
 declare -A LM_LIST_INFO_CACHE=()
 declare -A LM_LIST_BASE_CACHE=()
 declare -A LM_LIST_FEATURES_CACHE=()
 declare -A LM_LIST_ORIGIN_REF_CACHE=()
+LM_ORIGIN_REF_CACHE_LOADED=0
 LM_RESOLVED_BRANCH=""
+LM_OUTPUT_WIDTH=""
+LM_OUTPUT_WIDTH_CHECKED=0
 
 
 ensure_picker_plugin() {
@@ -50,15 +54,7 @@ log_err()  { printf "\e[31m%b\e[0m\n" "$*" >&2; }
 feature_list_contains() {
     local features="$1"
     local target="$2"
-    local feature_array=()
-    local feature
-
-    read -ra feature_array <<< "$features"
-    for feature in "${feature_array[@]}"; do
-        [[ "$feature" == "$target" ]] && return 0
-    done
-
-    return 1
+    [[ " $features " == *" $target "* ]]
 }
 
 get_feature_difference() {
@@ -121,7 +117,16 @@ format_feature() {
 }
 
 detect_output_width() {
-    local width="${GIT_LM_WRAP_WIDTH:-}"
+    local result_var="$1"
+    local width=""
+
+    if [[ $LM_OUTPUT_WIDTH_CHECKED -eq 1 ]]; then
+        [[ -n "$LM_OUTPUT_WIDTH" ]] || return 1
+        printf -v "$result_var" "%s" "$LM_OUTPUT_WIDTH"
+        return 0
+    fi
+
+    width="${GIT_LM_WRAP_WIDTH:-}"
 
     if [[ ! "$width" =~ ^[0-9]+$ ]]; then
         width="${COLUMNS:-}"
@@ -139,10 +144,13 @@ detect_output_width() {
     fi
 
     if [[ ! "$width" =~ ^[0-9]+$ || $width -lt 20 ]]; then
+        LM_OUTPUT_WIDTH_CHECKED=1
         return 1
     fi
 
-    printf "%s" "$width"
+    LM_OUTPUT_WIDTH="$width"
+    LM_OUTPUT_WIDTH_CHECKED=1
+    printf -v "$result_var" "%s" "$LM_OUTPUT_WIDTH"
 }
 
 print_wrapped_features_line() {
@@ -161,7 +169,7 @@ print_wrapped_features_line() {
     read -ra feature_array <<< "$features"
     [[ ${#feature_array[@]} -eq 0 ]] && return 0
 
-    if ! max_width=$(detect_output_width); then
+    if ! detect_output_width max_width; then
         local formatted_features=""
         format_feature_list "$features" formatted_features "$difference_features"
         printf "%b%b\n" "$prefix" "$formatted_features"
@@ -223,9 +231,9 @@ print_summary_state_line() {
 
     local info_formatted=""
     if [[ -n "$info" ]]; then
-        info_formatted=$(printf "\e[90m%-35s\e[0m" "$info")
+        printf -v info_formatted "\e[90m%-35s\e[0m" "$info"
     else
-        info_formatted=$(printf "%-35s" "")
+        printf -v info_formatted "%-35s" ""
     fi
 
     local base_formatted=""
@@ -260,9 +268,9 @@ format_state_line() {
     
     local info_formatted=""
     if [[ -n "$info" ]]; then
-        info_formatted=$(printf "\e[90m%-35s\e[0m" "$info")
+        printf -v info_formatted "\e[90m%-35s\e[0m" "$info"
     else
-        info_formatted=$(printf "%-35s" "")
+        printf -v info_formatted "%-35s" ""
     fi
     
     local base_formatted=""
@@ -290,6 +298,7 @@ Commands:
   git lm add [feature] [name]                  Add feature to task ('.' for current branch)
   git lm rm [feature] [name]                   Remove feature from task ('.' for current)
   git lm status|st [name]                      Show status (auto-selects if unique)
+  git lm checkout|co [name]                    Switch to a light-merge task branch
   git lm refresh|rf [name] [--base branch]     Update base/features and rebuild task
   git lm list|ls                               List all light-merge tasks
   git lm push [name]                           Push local task to remote (override remote)
@@ -314,21 +323,22 @@ ensure_git_repo() {
 }
 
 resolve_ref() {
-    local name="$1"
+    local result_var="$1"
+    local name="$2"
     # 1. Try resolving as is (local branch, tag, etc.)
     if git rev-parse --verify "$name" >/dev/null 2>&1; then
-        echo "$name"
+        printf -v "$result_var" "%s" "$name"
         return 0
     fi
     # 2. Try origin prefix
     if git rev-parse --verify "origin/$name" >/dev/null 2>&1; then
-        echo "origin/$name"
+        printf -v "$result_var" "%s" "origin/$name"
         return 0
     fi
     # 3. Try fetching on-demand
     log_info "Ref $name not found, trying to fetch from origin..."
     if git fetch origin "$name" >/dev/null 2>&1; then
-        echo "FETCH_HEAD"
+        printf -v "$result_var" "%s" "FETCH_HEAD"
         return 0
     fi
     return 1
@@ -336,6 +346,10 @@ resolve_ref() {
 
 feature_has_origin_ref() {
     local feature="$1"
+    if [[ $LM_ORIGIN_REF_CACHE_LOADED -eq 1 ]]; then
+        [[ -n "${LM_LIST_ORIGIN_REF_CACHE[refs/remotes/origin/$feature]:-}" ]]
+        return
+    fi
     git show-ref --verify -q "refs/remotes/origin/$feature" 2>/dev/null
 }
 
@@ -365,6 +379,7 @@ validate_loaded_state_features() {
     local missing=()
     local f
 
+    load_origin_ref_cache
     for f in "${LM_FEATURES[@]}"; do
         if ! feature_has_origin_ref "$f"; then
             missing+=("$f")
@@ -405,12 +420,15 @@ list_feature_has_origin_ref() {
 load_origin_ref_cache() {
     LM_LIST_ORIGIN_REF_CACHE=()
 
-    local origin_refs
-    origin_refs=$(git for-each-ref --format='%(refname)' refs/remotes/origin 2>/dev/null || true)
     local origin_ref
     while IFS= read -r origin_ref; do
         [[ -n "$origin_ref" ]] && LM_LIST_ORIGIN_REF_CACHE["$origin_ref"]=1
-    done <<< "$origin_refs"
+    done < <(git for-each-ref --format='%(refname)' refs/remotes/origin 2>/dev/null || true)
+    LM_ORIGIN_REF_CACHE_LOADED=1
+}
+
+ensure_origin_ref_cache() {
+    [[ $LM_ORIGIN_REF_CACHE_LOADED -eq 1 ]] || load_origin_ref_cache
 }
 
 get_missing_origin_features() {
@@ -446,25 +464,16 @@ warn_missing_origin_feature_sets() {
     local indent="$1"
     shift
     local combined_features=""
-    local seen_features=()
+    declare -A seen_features=()
     local feature_array=()
     local features
     local f
-    local seen
 
     for features in "$@"; do
         read -ra feature_array <<< "$features"
         for f in "${feature_array[@]}"; do
-            seen=0
-            local existing
-            for existing in "${seen_features[@]}"; do
-                if [[ "$existing" == "$f" ]]; then
-                    seen=1
-                    break
-                fi
-            done
-            if [[ $seen -eq 0 ]]; then
-                seen_features+=("$f")
+            if [[ -z "${seen_features[$f]:-}" ]]; then
+                seen_features["$f"]=1
                 [[ -n "$combined_features" ]] && combined_features+=" "
                 combined_features+="$f"
             fi
@@ -493,11 +502,8 @@ get_lm_state_features_for_side() {
         ref="refs/remotes/origin/$full_branch"
     fi
 
-    if ! git show-ref --verify -q "$ref" 2>/dev/null; then
-        return 1
-    fi
-
-    subject=$(git log -1 --format=%s "$ref" 2>/dev/null || true)
+    subject=$(git for-each-ref --format='%(contents:subject)' "$ref" 2>/dev/null || true)
+    [[ -n "$subject" ]] || return 1
     if parse_lm_state_subject "$subject" state_base state_features; then
         printf -v "$features_var" "%s" "$state_features"
         return 0
@@ -525,7 +531,7 @@ guard_lm_state_has_no_missing_origin_features() {
     local action="$3"
     local missing=""
 
-    load_origin_ref_cache
+    ensure_origin_ref_cache
     get_missing_origin_features_for_side "$full_branch" "$side" missing
     if [[ -n "$missing" ]]; then
         print_lm_task_summary_block "Summary" "$full_branch"
@@ -538,6 +544,7 @@ print_lm_task_summary_lines() {
     local indent="$1"
     local full_branch="$2"
     local leading="${3:-}"
+    local use_list_cache="${4:-0}"
     local local_ref="refs/heads/$full_branch"
     local remote_ref="refs/remotes/origin/$full_branch"
 
@@ -552,29 +559,44 @@ print_lm_task_summary_lines() {
     local local_features=""
     local remote_features=""
 
-    local refs
-    refs=$(git for-each-ref --format='%(refname)|%(objectname)|%(authorname)|%(authordate:relative)|%(contents:subject)' "$local_ref" "$remote_ref" 2>/dev/null || true)
-    local ref sha author rel_time subject
-    while IFS='|' read -r ref sha author rel_time subject; do
-        [[ -z "$ref" ]] && continue
-        local state_base=""
-        local state_features=""
-        parse_lm_state_subject "$subject" state_base state_features || true
-
-        if [[ "$ref" == "$local_ref" ]]; then
+    if [[ "$use_list_cache" == "1" ]]; then
+        local_sha="${LM_LIST_SHA_CACHE[$local_ref]:-}"
+        remote_sha="${LM_LIST_SHA_CACHE[$remote_ref]:-}"
+        if [[ -n "$local_sha" ]]; then
             has_local=1
-            local_sha="$sha"
-            [[ -n "$author" || -n "$rel_time" ]] && local_info="$rel_time by $author"
-            local_base="$state_base"
-            local_features="$state_features"
-        elif [[ "$ref" == "$remote_ref" ]]; then
-            has_remote=1
-            remote_sha="$sha"
-            [[ -n "$author" || -n "$rel_time" ]] && remote_info="$rel_time by $author"
-            remote_base="$state_base"
-            remote_features="$state_features"
+            local_info="${LM_LIST_INFO_CACHE[$local_ref]:-}"
+            local_base="${LM_LIST_BASE_CACHE[$local_ref]:-}"
+            local_features="${LM_LIST_FEATURES_CACHE[$local_ref]:-}"
         fi
-    done <<< "$refs"
+        if [[ -n "$remote_sha" ]]; then
+            has_remote=1
+            remote_info="${LM_LIST_INFO_CACHE[$remote_ref]:-}"
+            remote_base="${LM_LIST_BASE_CACHE[$remote_ref]:-}"
+            remote_features="${LM_LIST_FEATURES_CACHE[$remote_ref]:-}"
+        fi
+    else
+        local ref sha author rel_time subject
+        while IFS='|' read -r ref sha author rel_time subject; do
+            [[ -z "$ref" ]] && continue
+            local state_base=""
+            local state_features=""
+            parse_lm_state_subject "$subject" state_base state_features || true
+
+            if [[ "$ref" == "$local_ref" ]]; then
+                has_local=1
+                local_sha="$sha"
+                [[ -n "$author" || -n "$rel_time" ]] && local_info="$rel_time by $author"
+                local_base="$state_base"
+                local_features="$state_features"
+            elif [[ "$ref" == "$remote_ref" ]]; then
+                has_remote=1
+                remote_sha="$sha"
+                [[ -n "$author" || -n "$rel_time" ]] && remote_info="$rel_time by $author"
+                remote_base="$state_base"
+                remote_features="$state_features"
+            fi
+        done < <(git for-each-ref --format='%(refname)|%(objectname)|%(authorname)|%(authordate:relative)|%(contents:subject)' "$local_ref" "$remote_ref" 2>/dev/null || true)
+    fi
 
     if [[ $has_local -eq 1 ]] && load_pending_state "$full_branch"; then
         local_base="$LM_BASE"
@@ -631,7 +653,7 @@ print_lm_task_summary_block() {
     printf "\e[90m========================================\e[0m\n" >&2
     [[ -n "$title" ]] && printf "\e[1;32m%s\e[0m\n" "$title" >&2
     printf "Target: \e[1;33m%s\e[0m\n" "$target_branch" >&2
-    load_origin_ref_cache
+    ensure_origin_ref_cache
     print_lm_task_summary_lines "" "$target_branch" >&2
     printf "\e[90m========================================\e[0m\n" >&2
 }
@@ -674,23 +696,18 @@ print_merge_success_summary() {
 }
 
 get_current_branch() {
-    git branch --show-current
-}
-
-is_lm_branch() {
-    local branch=$(get_current_branch)
-    [[ -n "$branch" && "$branch" == "$LM_PREFIX"* ]]
-}
-
-get_lm_name() {
-    get_current_branch
+    local result_var="$1"
+    local branch_value=""
+    IFS= read -r branch_value < <(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    printf -v "$result_var" "%s" "$branch_value"
 }
 
 get_default_base_branch() {
-    local ref
-    ref=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null || echo "")
+    local result_var="$1"
+    local ref=""
+    IFS= read -r ref < <(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null || true)
     local default_branch="${ref#refs/remotes/origin/}"
-    printf "%s\n" "${default_branch:-main}"
+    printf -v "$result_var" "%s" "${default_branch:-main}"
 }
 
 get_pending_dir() {
@@ -711,95 +728,94 @@ resolve_lm_branch() {
     local var_name=$1
     local name=$2
     if [[ "$name" == "$LM_PREFIX"* ]]; then
-        name=$(get_lm_task_name "$name")
+        get_lm_task_name name "$name"
     fi
     local target="${LM_NAME_TEMPLATE//\{name\}/$name}"
     printf -v "$var_name" "%s" "$target"
 }
 
 get_lm_task_name() {
-    local full_name="$1"
+    local result_var="$1"
+    local full_name="$2"
     local suffix="${full_name#$LM_PREFIX}"
     local name_prefix="${LM_NAME_TEMPLATE#$LM_PREFIX}"
     name_prefix="${name_prefix%%\{name\}*}"
-    echo "${suffix#$name_prefix}"
+    printf -v "$result_var" "%s" "${suffix#$name_prefix}"
 }
 
-# Helper to find the target LM branch when not on one
-# Scans both local and remote-tracking branches so pull/sync work on remote-only tasks
-find_target_lm() {
+# Resolve an LM task from an explicit name or the available task list.
+# Modes: current (prefer the current LM branch) or choose (always choose from tasks).
+resolve_lm_target() {
     local input_name="${1:-}"
+    local mode="${2:-current}"
     LM_RESOLVED_BRANCH=""
-    
+
     if [[ -n "$input_name" ]]; then
         resolve_lm_branch LM_RESOLVED_BRANCH "$input_name"
         return 0
     fi
-    
-    local current_branch
-    current_branch=$(git branch --show-current 2>/dev/null || echo "")
-    if [[ -n "$current_branch" && "$current_branch" == "$LM_PREFIX"* ]]; then
-        LM_RESOLVED_BRANCH="$current_branch"
-        return 0
+
+    if [[ "$mode" == "current" ]]; then
+        local current_branch=""
+        get_current_branch current_branch
+        if [[ -n "$current_branch" && "$current_branch" == "$LM_PREFIX"* ]]; then
+            LM_RESOLVED_BRANCH="$current_branch"
+            return 0
+        fi
+    elif [[ "$mode" != "choose" ]]; then
+        log_err "Error: Invalid light-merge task selection mode: $mode"
+        return 1
     fi
-    
-    # Collect unique task names from local + remote branches
-    declare -A seen_tasks
-    local task_list=""
-    local all_refs
-    all_refs=$(git for-each-ref --format='%(refname:short)' "refs/heads/${LM_PREFIX}*" "refs/remotes/origin/${LM_PREFIX}*" 2>/dev/null || true)
-    while read -r ref; do
+
+    # Read directly into Bash arrays to avoid string parsing and extra grep/tr
+    # processes, which are noticeably costly in Windows Git Bash.
+    declare -A seen_tasks=()
+    local task_names=()
+    local ref branch task
+    while IFS= read -r ref; do
         [[ -z "$ref" ]] && continue
-        local branch="$ref"
-        # Strip 'origin/' prefix for remote refs to get the canonical branch name
+        branch="$ref"
         if [[ "$branch" == "origin/${LM_PREFIX}"* ]]; then
             branch="${branch#origin/}"
         fi
-        local task=$(get_lm_task_name "$branch")
+        get_lm_task_name task "$branch"
         if [[ -z "${seen_tasks[$task]:-}" ]]; then
             seen_tasks["$task"]="$branch"
-            task_list="$task_list$task"$'\n'
+            task_names+=("$task")
         fi
-    done <<< "$all_refs"
-    
-    local task_count=0
-    if [[ -n "$task_list" ]]; then
-        task_count=$(printf "%s" "$task_list" | grep -c . 2>/dev/null || true)
-    fi
-    
-    if [[ $task_count -eq 0 ]]; then
+    done < <(git for-each-ref --sort=refname --format='%(refname:short)' "refs/heads/${LM_PREFIX}*" "refs/remotes/origin/${LM_PREFIX}*" 2>/dev/null || true)
+
+    case ${#task_names[@]} in
+    0)
         log_err "Error: No light-merge tasks found."
         return 1
-    elif [[ $task_count -eq 1 ]]; then
-        local only_task
-        only_task=$(printf "%s" "$task_list" | tr -d '\n')
-        local resolved
-        resolve_lm_branch resolved "$only_task"
-        log_info "Auto-selecting task: $resolved"
-        LM_RESOLVED_BRANCH="$resolved"
+        ;;
+    1)
+        resolve_lm_branch LM_RESOLVED_BRANCH "${task_names[0]}"
+        log_info "Auto-selecting task: $LM_RESOLVED_BRANCH"
         return 0
-    else
+        ;;
+    *)
         local choice=""
-        local exit_code=0
         ensure_picker_plugin
-        if [[ -x "$GIT_LM_PICKER_PLUGIN" ]]; then
-            choice=$(printf "%s" "$task_list" | "$GIT_LM_PICKER_PLUGIN" --header "Select light-merge task:" --single)
-            exit_code=$?
+        if [[ ! -x "$GIT_LM_PICKER_PLUGIN" ]]; then
+            log_err "Error: Task picker is unavailable: $GIT_LM_PICKER_PLUGIN"
+            return 1
         fi
-        
-        if [[ $exit_code -ne 0 ]]; then
+
+        if ! choice=$(printf '%s\n' "${task_names[@]}" | "$GIT_LM_PICKER_PLUGIN" --header "Select light-merge task:" --single); then
             log_warn "Aborted."
             return 1
         fi
-        
-        if [[ -n "$choice" ]]; then
-            resolve_lm_branch LM_RESOLVED_BRANCH "$choice"
-            return 0
-        else
+        if [[ -z "${seen_tasks[$choice]:-}" ]]; then
             log_err "Error: No task selected."
             return 1
         fi
-    fi
+
+        resolve_lm_branch LM_RESOLVED_BRANCH "$choice"
+        return 0
+        ;;
+    esac
 }
 
 save_pending_state() {
@@ -824,7 +840,7 @@ load_pending_state() {
     if [[ ! -f "$pending_dir/pending" || ! -s "$pending_dir/pending" ]]; then
         return 1
     fi
-    LM_BASE=$(cat "$pending_dir/base")
+    IFS= read -r LM_BASE < "$pending_dir/base" || true
     LM_FEATURES=()
     while read -r line || [[ -n "$line" ]]; do [[ -n "$line" ]] && LM_FEATURES+=("$line"); done < "$pending_dir/features"
     LM_PENDING=()
@@ -889,9 +905,10 @@ do_merge() {
 
     # Pre-flight check and cache resolved feature refs for this merge run.
     LM_RESOLVED_REFS=()
+    load_origin_ref_cache
     for f in "${features[@]}"; do
-        local resolved_ref
-        if ! resolved_ref=$(resolve_ref "$f"); then
+        local resolved_ref=""
+        if ! resolve_ref resolved_ref "$f"; then
             log_err "Error: Could not resolve $f. Aborting."
             exit 1
         fi
@@ -901,8 +918,9 @@ do_merge() {
         fi
     done
 
-    local base_ref
-    base_ref=$(resolve_ref "$base") || { log_err "Error: Base $base not found"; exit 1; }
+    local base_ref=""
+    resolve_ref base_ref "$base" || { log_err "Error: Base $base not found"; exit 1; }
+    LM_RESOLVED_BASE_REF="$base_ref"
     
     git checkout -q -B "$target_branch" "$base_ref"
     
@@ -925,7 +943,7 @@ run_merge_loop() {
         local ref
         ref="${LM_RESOLVED_REFS[$feature]:-}"
         if [[ -z "$ref" ]]; then
-            ref=$(resolve_ref "$feature") || { log_err "Error: Could not resolve $feature. Aborting."; exit 1; }
+            resolve_ref ref "$feature" || { log_err "Error: Could not resolve $feature. Aborting."; exit 1; }
         fi
         require_remote_backed_feature "$feature" "$ref" || exit 1
         
@@ -949,7 +967,11 @@ run_merge_loop() {
 
     # Finalize
     log_info "Finalizing squash merge..."
-    git reset -q --soft "$(resolve_ref "$base")" >/dev/null 2>&1
+    local base_ref="$LM_RESOLVED_BASE_REF"
+    if [[ -z "$base_ref" ]]; then
+        resolve_ref base_ref "$base" || { log_err "Error: Base $base not found"; exit 1; }
+    fi
+    git reset -q --soft "$base_ref" >/dev/null 2>&1
     
     # Write state as machine-readable single-line in commit message
     echo "LM-State: $base;${LM_FEATURES[*]}" | git commit -q --allow-empty -F - >/dev/null 2>&1
@@ -961,7 +983,8 @@ run_merge_loop() {
 }
 
 continue_cmd() {
-    local target_branch=$(get_current_branch)
+    local target_branch=""
+    get_current_branch target_branch
     if [[ -z "$target_branch" || "$target_branch" != "$LM_PREFIX"* ]]; then
         log_err "Error: Not on a LM branch"
         exit 1
@@ -985,9 +1008,10 @@ continue_cmd() {
 }
 
 status_cmd() {
-    find_target_lm "${1:-}" || return 1
+    resolve_lm_target "${1:-}" current || return 1
     local full_name="$LM_RESOLVED_BRANCH"
-    local name=$(get_lm_task_name "$full_name")
+    local name=""
+    get_lm_task_name name "$full_name"
 
     local local_ref="refs/heads/$full_name"
     local remote_ref="refs/remotes/origin/$full_name"
@@ -1105,7 +1129,7 @@ abort_cmd() {
         esac
     done
 
-    find_target_lm "${args[0]:-}" || return 1
+    resolve_lm_target "${args[0]:-}" current || return 1
     local target_branch="$LM_RESOLVED_BRANCH"
     
     # Load state to get base branch for checkout
@@ -1114,11 +1138,12 @@ abort_cmd() {
     else
         # No state — just try to checkout a sensible branch
         local base
-        base=$(get_default_base_branch)
+        get_default_base_branch base
     fi
     
     # If currently on this branch, switch away first
-    local current=$(get_current_branch)
+    local current=""
+    get_current_branch current
     if [[ "$current" == "$target_branch" ]]; then
         git checkout -q "$base" 2>/dev/null || git checkout -q main 2>/dev/null || git checkout -q master 2>/dev/null || true
     fi
@@ -1148,19 +1173,18 @@ prune_cmd() {
     log_info "Pruning orphaned in-progress conflict files..."
     local count=0
     if [[ -d "$LM_PENDING_ROOT" ]]; then
+        declare -A active_pending_dirs=()
+        local branch safe_branch
+        while IFS= read -r branch; do
+            [[ -z "$branch" ]] && continue
+            safe_branch="${branch//[\/\\ :*?\"<>|]/__}"
+            active_pending_dirs["$safe_branch"]=1
+        done < <(git for-each-ref --format='%(refname:short)' "refs/heads/${LM_PREFIX}*" 2>/dev/null || true)
+
         for d in "$LM_PENDING_ROOT"/*; do
             [[ -d "$d" ]] || continue
-            local safe_name=$(basename "$d")
-            # Check if any local branch still corresponds to this pending dir
-            local found=0
-            local branches=($(git branch --list "${LM_PREFIX}*" --format='%(refname:short)'))
-            for b in "${branches[@]}"; do
-                local s="${b//[\/\\ :*?\"<>|]/__}"
-                if [[ "$s" == "$safe_name" ]]; then
-                    found=1; break
-                fi
-            done
-            if [[ $found -eq 0 ]]; then
+            local safe_name="${d##*/}"
+            if [[ -z "${active_pending_dirs[$safe_name]:-}" ]]; then
                 rm -rf "$d"
                 count=$((count + 1))
             fi
@@ -1172,7 +1196,7 @@ prune_cmd() {
 
 push_cmd() {
     local name="${1:-}"
-    find_target_lm "$name" || return 1
+    resolve_lm_target "$name" current || return 1
     local full_name="$LM_RESOLVED_BRANCH"
     
     # Verify local branch exists
@@ -1198,7 +1222,7 @@ push_cmd() {
 
 pull_cmd() {
     local name="${1:-}"
-    find_target_lm "$name" || return 1
+    resolve_lm_target "$name" current || return 1
     local full_name="$LM_RESOLVED_BRANCH"
     
     local remote_ref="refs/remotes/origin/$full_name"
@@ -1215,7 +1239,8 @@ pull_cmd() {
         git checkout -b "$full_name" --track "origin/$full_name"
     else
         log_info "Overriding local branch '$full_name' with remote 'origin/$full_name'..."
-        local current=$(get_current_branch)
+        local current=""
+        get_current_branch current
         if [[ "$current" == "$full_name" ]]; then
             git reset --hard "origin/$full_name"
         else
@@ -1226,9 +1251,36 @@ pull_cmd() {
     print_lm_task_summary_block "Summary" "$full_name"
 }
 
+checkout_cmd() {
+    local input_name="${1:-}"
+    resolve_lm_target "$input_name" choose || return 1
+
+    local full_name="$LM_RESOLVED_BRANCH"
+    local local_ref="refs/heads/$full_name"
+    local remote_ref="refs/remotes/origin/$full_name"
+    local current
+    get_current_branch current
+
+    if [[ "$current" == "$full_name" ]]; then
+        log_info "Already on light-merge branch '$full_name'."
+        return 0
+    fi
+
+    if git show-ref --verify -q "$local_ref" 2>/dev/null; then
+        log_info "Switching to local light-merge branch '$full_name'..."
+        git checkout "$full_name"
+    elif git show-ref --verify -q "$remote_ref" 2>/dev/null; then
+        log_info "Creating local tracking branch '$full_name' from 'origin/$full_name'..."
+        git checkout -b "$full_name" --track "origin/$full_name"
+    else
+        log_err "Error: Light-merge branch '$full_name' does not exist locally or on origin."
+        return 1
+    fi
+}
+
 sync_cmd() {
     local name="${1:-}"
-    find_target_lm "$name" || return 1
+    resolve_lm_target "$name" current || return 1
     local full_name="$LM_RESOLVED_BRANCH"
     
     local local_ref="refs/heads/$full_name"
@@ -1304,13 +1356,13 @@ pick_cmd() {
     local base="$1"; shift
     local name=""
     if [[ $# -lt 1 ]]; then
-        if ! find_target_lm ""; then
+        if ! resolve_lm_target "" current; then
             exit 1
         fi
         local resolved_branch="$LM_RESOLVED_BRANCH"
         
         # Extract the clean name from the resolved full branch name
-        name=$(get_lm_task_name "$resolved_branch")
+        get_lm_task_name name "$resolved_branch"
     else
         name=$1
     fi
@@ -1353,7 +1405,7 @@ pick_cmd() {
             log_info "Reusing existing base: $base"
         else
             # Auto-detect default base branch from remote HEAD
-            base=$(get_default_base_branch)
+            get_default_base_branch base
         fi
     fi
 
@@ -1365,8 +1417,6 @@ pick_cmd() {
     declare -A pick_ordered=()
     local pick_order=()
     local recent_pick_order=()
-    local branch_refs
-    branch_refs=$(git for-each-ref --sort=-committerdate --format='%(refname)|%(refname:short)' refs/heads refs/remotes/origin 2>/dev/null || true)
     local ref short branch
     while IFS='|' read -r ref short; do
         [[ -z "$ref" ]] && continue
@@ -1386,7 +1436,7 @@ pick_cmd() {
             pick_seen["$branch"]=1
             recent_pick_order+=("$branch")
         fi
-    done <<< "$branch_refs"
+    done < <(git for-each-ref --sort=-committerdate --format='%(refname)|%(refname:short)' refs/heads refs/remotes/origin 2>/dev/null || true)
 
     # Keep current features at the top in their saved merge order. All remaining
     # branches retain the recency order supplied by git for-each-ref above.
@@ -1424,10 +1474,12 @@ pick_cmd() {
         local selected
         local selected_input=""
         if [[ ${#existing_features[@]} -gt 0 ]]; then
-            # Join array elements by comma safely under set -u
-            selected_input=$(IFS=,; echo "${existing_features[*]}")
+            local saved_ifs="$IFS"
+            IFS=,
+            selected_input="${existing_features[*]}"
+            IFS="$saved_ifs"
         fi
-        if ! selected=$(echo "$branch_list" | "$GIT_LM_PICKER_PLUGIN" --header "Base: $base | Space/Tab select | [ / ] change merge order | Enter confirm" --selected "$selected_input"); then
+        if ! selected=$(printf '%s' "$branch_list" | "$GIT_LM_PICKER_PLUGIN" --header "Base: $base | Space/Tab select | [ / ] change merge order | Enter confirm" --selected "$selected_input"); then
             log_warn "Aborted."
             exit 0
         fi
@@ -1452,17 +1504,15 @@ pick_cmd() {
         fi
 
         log_info "Base branch: $base"
+        declare -A existing_feature_orders=()
+        local merge_order
+        for merge_order in "${!existing_features[@]}"; do
+            existing_feature_orders["${existing_features[merge_order]}"]=$((merge_order + 1))
+        done
         for ((i=0; i<count; i++)); do
             local branch_name="${annotated_branches[$i]%% *}"
             local checkbox="[ ]"
-            local merge_order=0
-            for f in "${existing_features[@]}"; do
-                if [[ "$f" == "$branch_name" ]]; then
-                    checkbox="[$((merge_order + 1))]"
-                    break
-                fi
-                merge_order=$((merge_order + 1))
-            done
+            [[ -n "${existing_feature_orders[$branch_name]:-}" ]] && checkbox="[${existing_feature_orders[$branch_name]}]"
             printf "  [%2d] %s %s\n" "$((i+1))" "$checkbox" "${annotated_branches[$i]}"
         done
 
@@ -1514,7 +1564,7 @@ refresh_cmd() {
         fi
     done
 
-    find_target_lm "${args[0]:-}" || return 1
+    resolve_lm_target "${args[0]:-}" current || return 1
     local full_name="$LM_RESOLVED_BRANCH"
     load_state "$full_name" || { log_err "Error: No state found for $full_name"; exit 1; }
     
@@ -1549,13 +1599,15 @@ refresh_cmd() {
         fi
     fi
     
-    local name=$(get_lm_task_name "$full_name")
+    local name=""
+    get_lm_task_name name "$full_name"
     do_merge "$name" "$LM_BASE" "${LM_FEATURES[@]}"
 }
 
 clear_cmd() {
-    local branches=$(git branch --list "${LM_PREFIX}*" --format='%(refname:short)')
-    if [[ -z "$branches" ]]; then
+    local branches=()
+    mapfile -t branches < <(git for-each-ref --format='%(refname:short)' "refs/heads/${LM_PREFIX}*" 2>/dev/null || true)
+    if [[ ${#branches[@]} -eq 0 ]]; then
         log_info "No local light-merge branches found."
         return
     fi
@@ -1568,14 +1620,15 @@ clear_cmd() {
         return
     fi
     
-    local current=$(get_current_branch)
+    local current=""
+    get_current_branch current
     if [[ "$current" == "$LM_PREFIX"* ]]; then
         local default
-        default=$(get_default_base_branch)
+        get_default_base_branch default
         log_info "Switching to $default..."
         git checkout -q "$default" 2>/dev/null || git checkout -q main 2>/dev/null || git checkout -q master 2>/dev/null
     fi
-    echo "$branches" | xargs git branch -D
+    git branch -D -- "${branches[@]}"
     rm -rf "$LM_PENDING_ROOT"
     log_info "All local light-merge branches cleared."
 }
@@ -1613,7 +1666,7 @@ create_cmd() {
             log_info "Reusing existing base: $base"
         else
             # Auto-detect default base branch from remote HEAD
-            base=$(get_default_base_branch)
+            get_default_base_branch base
         fi
     fi
     
@@ -1650,23 +1703,12 @@ list_cmd() {
     LM_LIST_FEATURES_CACHE=()
     LM_LIST_ORIGIN_REF_CACHE=()
     
-    local refs
-    refs=$(git for-each-ref --format='%(refname)|%(objectname)|%(authorname)|%(authordate:relative)|%(contents:subject)' "refs/heads/${LM_PREFIX}*" "refs/remotes/origin/${LM_PREFIX}*" 2>/dev/null || true)
-    
-    if [[ -z "$refs" ]]; then
-        log_info "No light-merge branches found."
-        return
-    fi
+    load_origin_ref_cache
 
-    local origin_refs
-    origin_refs=$(git for-each-ref --format='%(refname)' refs/remotes/origin 2>/dev/null || true)
-    local origin_ref
-    while IFS= read -r origin_ref; do
-        [[ -n "$origin_ref" ]] && LM_LIST_ORIGIN_REF_CACHE["$origin_ref"]=1
-    done <<< "$origin_refs"
-
+    local task_count=0
     while IFS='|' read -r ref sha author rel_time subject; do
         [[ -z "$ref" ]] && continue
+        task_count=$((task_count + 1))
         LM_LIST_SHA_CACHE["$ref"]="$sha"
         if [[ -n "$author" || -n "$rel_time" ]]; then
             LM_LIST_INFO_CACHE["$ref"]="$rel_time by $author"
@@ -1679,14 +1721,21 @@ list_cmd() {
         fi
         if [[ "$ref" == refs/heads/* ]]; then
             local branch="${ref#refs/heads/}"
-            local task=$(get_lm_task_name "$branch")
+            local task=""
+            get_lm_task_name task "$branch"
             local_tasks["$task"]="$branch"
         elif [[ "$ref" == refs/remotes/origin/* ]]; then
             local branch="${ref#refs/remotes/origin/}"
-            local task=$(get_lm_task_name "$branch")
+            local task=""
+            get_lm_task_name task "$branch"
             remote_tasks["$task"]="$branch"
         fi
-    done <<< "$refs"
+    done < <(git for-each-ref --format='%(refname)|%(objectname)|%(authorname)|%(authordate:relative)|%(contents:subject)' "refs/heads/${LM_PREFIX}*" "refs/remotes/origin/${LM_PREFIX}*" 2>/dev/null || true)
+
+    if [[ $task_count -eq 0 ]]; then
+        log_info "No light-merge branches found."
+        return
+    fi
 
     # Get union of keys
     local all_tasks=()
@@ -1706,7 +1755,8 @@ list_cmd() {
     fi
 
     log_info "Available light-merge branches:"
-    local current=$(get_current_branch)
+    local current=""
+    get_current_branch current
     
     for t in "${sorted_tasks[@]}"; do
         local local_branch="${local_tasks[$t]:-}"
@@ -1750,7 +1800,7 @@ list_cmd() {
         fi
         local summary_leading="${prefix} ${task_header} "
 
-        print_lm_task_summary_lines "    " "$task_name" "$summary_leading"
+        print_lm_task_summary_lines "    " "$task_name" "$summary_leading" 1
     done
 }
 
@@ -1760,7 +1810,7 @@ add_cmd() {
     
     # 1. Resolve feature: default to current branch if not provided or if '.' is used
     if [[ -z "$feature" || "$feature" == "." ]]; then
-        feature=$(get_current_branch)
+        get_current_branch feature
         if [[ -z "$feature" ]]; then log_err "Error: Not on a branch."; return 1; fi
         if [[ "$feature" == "$LM_PREFIX"* ]]; then
             log_err "Error: Cannot add a light-merge branch to itself."
@@ -1769,7 +1819,7 @@ add_cmd() {
     fi
     
     # 2. Resolve target task
-    find_target_lm "$target_task" || return 1
+    resolve_lm_target "$target_task" current || return 1
     local full_name="$LM_RESOLVED_BRANCH"
     
     # 3. Load state and check if already exists
@@ -1783,7 +1833,8 @@ add_cmd() {
     for f in "${LM_FEATURES[@]}"; do
         if [[ "$f" == "$feature" ]]; then
             log_info "Feature $feature is already in $full_name. Refreshing..."
-            local name=$(get_lm_task_name "$full_name")
+            local name=""
+            get_lm_task_name name "$full_name"
             do_merge "$name" "$LM_BASE" "${LM_FEATURES[@]}"
             return
         fi
@@ -1791,7 +1842,8 @@ add_cmd() {
     
     # 4. Add and rebuild
     LM_FEATURES+=("$feature")
-    local name=$(get_lm_task_name "$full_name")
+    local name=""
+    get_lm_task_name name "$full_name"
     log_info "Adding $feature to $full_name..."
     do_merge "$name" "$LM_BASE" "${LM_FEATURES[@]}"
 }
@@ -1802,11 +1854,11 @@ rm_cmd() {
     
     # 1. Resolve feature: default to current branch if not provided or if '.' is used
     if [[ -z "$feature" || "$feature" == "." ]]; then
-        feature=$(get_current_branch)
+        get_current_branch feature
     fi
     
     # 2. Resolve target task
-    find_target_lm "$target_task" || return 1
+    resolve_lm_target "$target_task" current || return 1
     local full_name="$LM_RESOLVED_BRANCH"
     
     # 3. Load state and filter
@@ -1833,7 +1885,8 @@ rm_cmd() {
     fi
     
     # 4. Rebuild
-    local name=$(get_lm_task_name "$full_name")
+    local name=""
+    get_lm_task_name name "$full_name"
     log_info "Removing $feature from $full_name..."
     do_merge "$name" "$LM_BASE" "${new_features[@]}"
 }
@@ -1847,6 +1900,7 @@ main() {
         add) shift; add_cmd "$@" ;;
         rm)  shift; rm_cmd "$@" ;;
         status|st) shift; status_cmd "$@" ;;
+        checkout|co) shift; checkout_cmd "$@" ;;
         list|ls) list_cmd ;;
         abort) shift; abort_cmd "$@" ;;
         continue|con) continue_cmd ;;

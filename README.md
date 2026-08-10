@@ -72,9 +72,10 @@ To remove `git-light-merge` completely:
 - `git lm add [feature] [name]` : Add a feature to a task. Use `.` for current branch.
 - `git lm rm [feature] [name]` : Remove a feature from a task.
 - `git lm status|st [name]` : Show the status and branches of a task.
+- `git lm checkout|co [name]` : Switch to a local light-merge branch, or create a local tracking branch when the task only exists on `origin`.
 - `git lm refresh|rf [name] [--base branch]` : Sync code and rebuild. Supports changing base.
 
-> **💡 Pro Tip (Smart Selection)**: For commands like `status`, `refresh`, `add`, `push`, and `abort`, if you are not on a light-merge branch and don't provide a name, the tool will automatically select the target task if only one exists in your repo.
+> **💡 Pro Tip (Smart Selection)**: For commands like `status`, `checkout`, `refresh`, `add`, `push`, and `abort`, if you are not on a light-merge branch and don't provide a name, the tool will automatically select the target task if only one exists in your repo.
 
 ### Task Management
 - `git lm list|ls` : List all integration tasks, labeled with type tags: `(L)` (local-only), `(R)` (remote-only), or `(L+R)` (local & remote). For each task, detailed commit info (time and author), base branch, and feature branches are printed in a clean, aligned, and indented layout.
@@ -124,10 +125,10 @@ You can also run only the tests related to the command you changed by passing on
 ```bash
 scripts/smoke-test.sh sync
 scripts/smoke-test.sh status sync
-scripts/smoke-test.sh syntax create status sync refresh pick
+scripts/smoke-test.sh syntax create status checkout sync refresh pick
 ```
 
-Available targets: `all`, `syntax`, `create`, `status`, `sync`, `refresh`, and `pick`. Running without arguments is the same as `all`.
+Available targets: `all`, `syntax`, `create`, `status`, `checkout`, `sync`, `refresh`, and `pick`. Running without arguments is the same as `all`.
 
 The smoke script creates temporary Git repositories and verifies core workflows such as `create`, `status`, `sync`, `refresh`, and native `pick` fallback behavior. It requires Bash 5.0+ and Git.
 

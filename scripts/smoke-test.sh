@@ -231,6 +231,44 @@ test_status() {
 	printf "status tests passed.\n"
 }
 
+test_checkout() {
+	printf "Running checkout tests...\n"
+
+	local repo="$TMP_ROOT/checkout-work"
+	local origin="$TMP_ROOT/checkout-origin.git"
+	init_repo "$repo"
+	add_origin "$origin"
+	add_feature_branch "feature/a"
+	git push -q origin feature/a
+
+	"$GIT_LM" create demo feature/a --base main > "$TMP_ROOT/checkout-create.out" 2>&1
+	git checkout -q main
+	"$GIT_LM" checkout demo > "$TMP_ROOT/checkout-local.out" 2>&1
+	assert_grep "Switching to local light-merge branch 'light-merge/demo'" "$TMP_ROOT/checkout-local.out"
+	[[ "$(git branch --show-current)" == "light-merge/demo" ]] || fail "checkout did not switch to the local LM branch"
+
+	"$GIT_LM" push demo > "$TMP_ROOT/checkout-push.out" 2>&1
+	git checkout -q main
+	git branch -D light-merge/demo >/dev/null
+	"$GIT_LM" co demo > "$TMP_ROOT/checkout-remote.out" 2>&1
+	assert_grep "Creating local tracking branch 'light-merge/demo'" "$TMP_ROOT/checkout-remote.out"
+	[[ "$(git branch --show-current)" == "light-merge/demo" ]] || fail "checkout did not create and switch to the remote LM branch"
+	[[ "$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}')" == "origin/light-merge/demo" ]] || fail "remote LM branch is not tracked"
+
+	"$GIT_LM" create second feature/a --base main > "$TMP_ROOT/checkout-second-create.out" 2>&1
+	cat > "$TMP_ROOT/select-second" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'second\n'
+EOF
+	chmod +x "$TMP_ROOT/select-second"
+	git checkout -q light-merge/demo
+	GIT_LM_PICKER_PLUGIN="$TMP_ROOT/select-second" "$GIT_LM" co > "$TMP_ROOT/checkout-select.out" 2>&1
+	[[ "$(git branch --show-current)" == "light-merge/second" ]] || fail "checkout did not offer task selection from an LM branch"
+
+	printf "checkout tests passed.\n"
+}
+
 test_sync() {
 	printf "Running sync tests...\n"
 
@@ -313,9 +351,29 @@ test_pick() {
 	printf "pick tests passed.\n"
 }
 
+test_prune() {
+	printf "Running prune tests...\n"
+
+	local repo="$TMP_ROOT/prune-work"
+	init_repo "$repo"
+	git branch light-merge/active
+
+	local pending_root
+	pending_root="$(git rev-parse --git-dir)/light-merge-pending"
+	mkdir -p "$pending_root/light-merge__active" "$pending_root/light-merge__orphan"
+	touch "$pending_root/light-merge__active/pending" "$pending_root/light-merge__orphan/pending"
+
+	"$GIT_LM" prune > "$TMP_ROOT/prune.out" 2>&1
+	[[ -d "$pending_root/light-merge__active" ]] || fail "active pending state was removed"
+	[[ ! -e "$pending_root/light-merge__orphan" ]] || fail "orphan pending state was not removed"
+	assert_grep "Cleaned up 1 orphaned conflict state" "$TMP_ROOT/prune.out"
+
+	printf "prune tests passed.\n"
+}
+
 usage() {
 	cat <<EOF
-Usage: scripts/smoke-test.sh [all|syntax|create|status|sync|refresh|pick]...
+Usage: scripts/smoke-test.sh [all|syntax|create|status|checkout|sync|refresh|pick|prune]...
 
 Examples:
   scripts/smoke-test.sh              # run all tests
@@ -330,16 +388,20 @@ run_suite() {
 			test_syntax
 			test_create
 			test_status
+			test_checkout
 			test_sync
 			test_refresh
 			test_pick
+			test_prune
 			;;
 		syntax) test_syntax ;;
 		create) test_create ;;
 		status) test_status ;;
+		checkout) test_checkout ;;
 		sync) test_sync ;;
 		refresh) test_refresh ;;
 		pick) test_pick ;;
+		prune) test_prune ;;
 		help|--help|-h) usage ;;
 		*)
 			usage >&2

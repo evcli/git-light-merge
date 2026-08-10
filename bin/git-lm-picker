@@ -63,20 +63,17 @@ declare -A selected_orders=()
 
 # Pre-populate selected_indices if --selected is provided
 if [[ -n "$selected_input" ]]; then
-    # Split selected_input by comma safely (Bash 3.2+ compatible)
+    # Index pre-selected names once, then retain the candidate-list order.
     IFS=',' read -r -a pre_selected <<< "$selected_input"
+    declare -A pre_selected_names=()
+    for ps in "${pre_selected[@]}"; do
+        pre_selected_names["$ps"]=1
+    done
     for i in "${!branches[@]}"; do
         # Extract the branch name (everything before the first space)
         item="${branches[i]}"
         b_name="${item%% *}"
-        
-        # Check if b_name exists in pre_selected list
-        for ps in "${pre_selected[@]}"; do
-            if [[ "$b_name" == "$ps" ]]; then
-                selected_indices+=("$i")
-                break
-            fi
-        done
+        [[ -n "${pre_selected_names[$b_name]:-}" ]] && selected_indices+=("$i")
     done
 fi
 cursor_idx=0
