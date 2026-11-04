@@ -110,6 +110,36 @@ Customize the tool via environment variables:
 
 - `GIT_LM_TEMPLATE`: Branch naming template (Default: `light-merge/{name}`).
 
+### Generated commit message
+
+Light-merge keeps its shareable state in the generated commit message. By default,
+the subject is `FSASAPIDEV-377 LM-State: main;feature/a feature/b`.
+
+The `LM-State: <base>;<ordered features>` section is managed by the tool and must
+not be edited. The text before it is configurable using Git configuration:
+
+- Set `lightmerge.commitPrefix` to any single-line supplemental text, such as a
+  Jira ID or a Jira ID followed by an integration description.
+- For this repository: `git config lightmerge.commitPrefix "FSASAPIDEV-377 Integration"`.
+- For all repositories: `git config --global lightmerge.commitPrefix "FSASAPIDEV-377"`.
+- Repository configuration overrides global configuration. If neither is set,
+  the default is `FSASAPIDEV-377`.
+- An explicitly empty value (`git config lightmerge.commitPrefix ""`) restores
+  the old `LM-State: ...` format, but may fail pipelines requiring a Jira ID.
+- Remove a repository override with `git config --unset lightmerge.commitPrefix`.
+
+The prefix is treated as literal text, not a template or shell command. Line
+breaks and the reserved marker `LM-State:` are not allowed in the prefix.
+It applies whenever a final squash commit is generated, including after
+`refresh`, `add`, `rm`, `pick`, and conflict resolution with `continue`.
+Existing commits are not rewritten simply by changing the setting; rebuild the
+task (for example with `git lm refresh`) to generate a new message.
+
+The generated message travels with normal branch push/fetch operations; Git
+configuration itself is not copied to teammates. Existing unprefixed state
+messages remain readable. This setting does not change PR titles or validate
+whether the configured Jira ID meets a particular pipeline's policy.
+
 ---
 
 ## 🧪 Development / Testing
@@ -128,7 +158,7 @@ scripts/smoke-test.sh status sync
 scripts/smoke-test.sh syntax create status checkout sync refresh pick
 ```
 
-Available targets: `all`, `syntax`, `create`, `status`, `checkout`, `sync`, `refresh`, and `pick`. Running without arguments is the same as `all`.
+Available targets: `all`, `syntax`, `create`, `message`, `status`, `checkout`, `sync`, `refresh`, `pick`, and `prune`. Running without arguments is the same as `all`.
 
 The smoke script creates temporary Git repositories and verifies core workflows such as `create`, `status`, `sync`, `refresh`, and native `pick` fallback behavior. It requires Bash 5.0+ and Git.
 

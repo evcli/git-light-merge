@@ -20,6 +20,8 @@ LM_GIT_DIR=""
 LM_PENDING_ROOT=""
 GIT_LM_PICKER_PLUGIN="${GIT_LM_PICKER_PLUGIN:-}"
 LM_BASE=""
+LM_DEFAULT_COMMIT_PREFIX="FSASAPIDEV-377"
+LM_COMMIT_PREFIX=""
 declare -a LM_FEATURES=()
 declare -a LM_PENDING=()
 declare -A LM_RESOLVED_REFS=()
@@ -889,6 +891,19 @@ load_state() {
     return 1
 }
 
+load_commit_prefix() {
+    # Keep the optional human-readable prefix separate from the fixed state format.
+    LM_COMMIT_PREFIX=$(git config --get lightmerge.commitPrefix) || LM_COMMIT_PREFIX="$LM_DEFAULT_COMMIT_PREFIX"
+    if [[ "$LM_COMMIT_PREFIX" == *$'\n'* || "$LM_COMMIT_PREFIX" == *$'\r'* ]]; then
+        log_err "Error: lightmerge.commitPrefix must be a single line."
+        return 1
+    fi
+    if [[ "$LM_COMMIT_PREFIX" == *"LM-State:"* ]]; then
+        log_err "Error: lightmerge.commitPrefix must not contain the reserved marker 'LM-State:'."
+        return 1
+    fi
+}
+
 # Core merge logic
 do_merge() {
     local name=$1
@@ -897,6 +912,7 @@ do_merge() {
     local features=("$@")
     
     local target_branch="${LM_NAME_TEMPLATE//\{name\}/$name}"
+    load_commit_prefix || return 1
     
     if [[ -n "$(git status --porcelain)" ]]; then
         log_err "Error: Working tree is not clean."
@@ -935,6 +951,8 @@ run_merge_loop() {
     local queue=("$@")
     local total=${#queue[@]}
     local i=0
+    # Also validate here for 'continue', which does not go through do_merge.
+    load_commit_prefix || return 1
 
     for feature in "${queue[@]}"; do
         i=$((i + 1))
@@ -973,8 +991,8 @@ run_merge_loop() {
     fi
     git reset -q --soft "$base_ref" >/dev/null 2>&1
     
-    # Write state as machine-readable single-line in commit message
-    echo "LM-State: $base;${LM_FEATURES[*]}" | git commit -q --allow-empty -F - >/dev/null 2>&1
+    # Keep state in the subject for all existing readers; treat the prefix literally.
+    printf '%sLM-State: %s;%s\n' "${LM_COMMIT_PREFIX:+$LM_COMMIT_PREFIX }" "$base" "${LM_FEATURES[*]}" | git commit -q --allow-empty -F - >/dev/null 2>&1
     
     # Clear any in-progress pending state (merge completed successfully)
     clear_pending_state "$target_branch"

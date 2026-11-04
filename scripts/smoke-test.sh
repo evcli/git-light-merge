@@ -133,6 +133,96 @@ test_create() {
 	printf "create tests passed.\n"
 }
 
+test_commit_message() {
+	printf "Running commit message tests...\n"
+
+	local repo="$TMP_ROOT/message-work"
+	local origin="$TMP_ROOT/message-origin.git"
+	init_repo "$repo"
+	add_origin "$origin"
+	add_feature_branch "feature/a"
+	git push -q origin feature/a
+	git config lightmerge.commitPrefix FSASAPIDEV-377
+
+	"$GIT_LM" create demo feature/a --base main > "$TMP_ROOT/message-create.out" 2>&1
+	[[ "$(git log -1 --format=%s)" == "FSASAPIDEV-377 LM-State: main;feature/a" ]] || fail "Jira prefix missing from generated commit"
+
+	local prefix='TEAM-123 Integration 100% C:\build'
+	git config lightmerge.commitPrefix "$prefix"
+	"$GIT_LM" refresh demo > "$TMP_ROOT/message-refresh.out" 2>&1
+	[[ "$(git log -1 --format=%B)" == "$prefix LM-State: main;feature/a" ]] || fail "configured prefix was not preserved literally"
+	"$GIT_LM" status demo > "$TMP_ROOT/message-status.out" 2>&1
+	assert_grep "Base    : .*main" "$TMP_ROOT/message-status.out"
+	assert_grep "Features: .*feature/a" "$TMP_ROOT/message-status.out"
+	"$GIT_LM" list > "$TMP_ROOT/message-list.out" 2>&1
+	assert_grep "features: .*feature/a" "$TMP_ROOT/message-list.out"
+
+	"$GIT_LM" push demo > "$TMP_ROOT/message-push.out" 2>&1
+	local peer="$TMP_ROOT/message-peer"
+	git clone -q --branch main "$origin" "$peer"
+	cd "$peer"
+	git config user.email test@example.com
+	git config user.name Tester
+	"$GIT_LM" status demo > "$TMP_ROOT/message-remote-status.out" 2>&1
+	assert_grep "Features: .*feature/a" "$TMP_ROOT/message-remote-status.out"
+	"$GIT_LM" pull demo > "$TMP_ROOT/message-pull.out" 2>&1
+	[[ "$(git log -1 --format=%s)" == "$prefix LM-State: main;feature/a" ]] || fail "prefix did not travel with branch"
+	# A fresh clone has no repository-specific prefix setting: use the default.
+	"$GIT_LM" refresh demo > "$TMP_ROOT/message-peer-refresh.out" 2>&1
+	[[ "$(git log -1 --format=%s)" == "FSASAPIDEV-377 LM-State: main;feature/a" ]] || fail "default Jira prefix missing in fresh clone"
+
+	cd "$repo"
+	git config lightmerge.commitPrefix ''
+	"$GIT_LM" refresh demo > "$TMP_ROOT/message-empty.out" 2>&1
+	[[ "$(git log -1 --format=%s)" == 'LM-State: main;feature/a' ]] || fail "empty prefix did not preserve legacy format"
+	"$GIT_LM" status demo > "$TMP_ROOT/message-legacy-status.out" 2>&1
+	assert_grep "Features: .*feature/a" "$TMP_ROOT/message-legacy-status.out"
+
+	local before
+	before=$(git rev-parse HEAD)
+	git config lightmerge.commitPrefix $'TEAM-123\ninvalid'
+	if "$GIT_LM" refresh demo > "$TMP_ROOT/message-invalid.out" 2>&1; then
+		fail "multiline prefix unexpectedly accepted"
+	fi
+	assert_grep "lightmerge.commitPrefix must be a single line" "$TMP_ROOT/message-invalid.out"
+	[[ "$(git rev-parse HEAD)" == "$before" ]] || fail "invalid prefix changed branch HEAD"
+	git config lightmerge.commitPrefix $'TEAM-123\rinvalid'
+	if "$GIT_LM" create demo feature/a --base main > "$TMP_ROOT/message-cr.out" 2>&1; then
+		fail "carriage return prefix unexpectedly accepted"
+	fi
+	assert_grep "lightmerge.commitPrefix must be a single line" "$TMP_ROOT/message-cr.out"
+	[[ "$(git rev-parse HEAD)" == "$before" ]] || fail "invalid prefix changed branch HEAD"
+	git config lightmerge.commitPrefix 'TEAM-123 LM-State: fake;fake'
+	if "$GIT_LM" create demo feature/a --base main > "$TMP_ROOT/message-reserved.out" 2>&1; then
+		fail "reserved state marker unexpectedly accepted in prefix"
+	fi
+	assert_grep "reserved marker" "$TMP_ROOT/message-reserved.out"
+	[[ "$(git rev-parse HEAD)" == "$before" ]] || fail "reserved marker changed branch HEAD"
+	git config --unset lightmerge.commitPrefix
+
+	local feature
+	for feature in conflict-a conflict-b; do
+		git checkout -q main
+		git checkout -q -b "feature/$feature"
+		printf '%s\n' "$feature" > file.txt
+		git add file.txt
+		git commit -q -m "$feature"
+		git push -q origin "feature/$feature"
+	done
+	if "$GIT_LM" create conflict feature/conflict-a feature/conflict-b --base main > "$TMP_ROOT/message-conflict.out" 2>&1; then
+		fail "conflicting features unexpectedly merged without intervention"
+	fi
+	assert_grep "Conflict detected" "$TMP_ROOT/message-conflict.out"
+	printf 'resolved\n' > file.txt
+	git add file.txt
+	git commit -q --no-edit
+	git config lightmerge.commitPrefix 'TEAM-456 Conflict integration'
+	"$GIT_LM" continue > "$TMP_ROOT/message-continue.out" 2>&1
+	[[ "$(git log -1 --format=%s)" == 'TEAM-456 Conflict integration LM-State: main;feature/conflict-a feature/conflict-b' ]] || fail "continue did not apply configured prefix"
+
+	printf "commit message tests passed.\n"
+}
+
 test_status() {
 	printf "Running status tests...\n"
 
@@ -373,7 +463,7 @@ test_prune() {
 
 usage() {
 	cat <<EOF
-Usage: scripts/smoke-test.sh [all|syntax|create|status|checkout|sync|refresh|pick|prune]...
+Usage: scripts/smoke-test.sh [all|syntax|create|message|status|checkout|sync|refresh|pick|prune]...
 
 Examples:
   scripts/smoke-test.sh              # run all tests
@@ -387,6 +477,7 @@ run_suite() {
 		all)
 			test_syntax
 			test_create
+						test_commit_message
 			test_status
 			test_checkout
 			test_sync
@@ -396,6 +487,7 @@ run_suite() {
 			;;
 		syntax) test_syntax ;;
 		create) test_create ;;
+				message) test_commit_message ;;
 		status) test_status ;;
 		checkout) test_checkout ;;
 		sync) test_sync ;;
