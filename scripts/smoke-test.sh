@@ -239,6 +239,19 @@ test_status() {
 	assert_grep "Base    : .*main" "$TMP_ROOT/status.out"
 	assert_grep "Features: .*feature/a" "$TMP_ROOT/status.out"
 
+	local initial_sha
+	initial_sha=$(git rev-parse light-merge/demo)
+	assert_grep "Commit  : Local .*${initial_sha:0:7}" "$TMP_ROOT/status.out"
+	assert_grep "local:.*${initial_sha:0:7}" "$TMP_ROOT/status-create.out"
+	assert_not_grep "$initial_sha" "$TMP_ROOT/status.out"
+
+	local colored_commit
+	colored_commit=$(printf '\033\\[33m%s\033\\[90m .*by Tester' "${initial_sha:0:7}")
+	local colored_commit_info
+	colored_commit_info=$(printf '\033\\[33m%s\033\\[0m \\[\033\\[90m.*by Tester\033\\[0m\\]' "${initial_sha:0:7}")
+	assert_grep "Commit  : Local ${colored_commit_info}" "$TMP_ROOT/status.out"
+	assert_grep "local:.*${colored_commit}" "$TMP_ROOT/status-create.out"
+
 	"$GIT_LM" push demo > "$TMP_ROOT/status-initial-push.out" 2>&1
 	assert_grep "Summary" "$TMP_ROOT/status-initial-push.out"
 
@@ -256,6 +269,8 @@ test_status() {
 	"$GIT_LM" list > "$TMP_ROOT/list-missing-remote.out" 2>&1
 	assert_grep "light-merge/demo" "$TMP_ROOT/list-missing-remote.out"
 	assert_grep "light-merge/demo.*synced:" "$TMP_ROOT/list-missing-remote.out"
+	assert_grep "synced:.*${initial_sha:0:7}" "$TMP_ROOT/list-missing-remote.out"
+	assert_grep "synced:.*${colored_commit}" "$TMP_ROOT/list-missing-remote.out"
 	assert_grep "missing on origin: feature/a" "$TMP_ROOT/list-missing-remote.out"
 	assert_not_grep "Task 'light-merge/demo'" "$TMP_ROOT/list-missing-remote.out"
 	assert_grep "$red_feature" "$TMP_ROOT/list-missing-remote.out"
@@ -271,6 +286,10 @@ test_status() {
 	git push -q origin feature/b
 	"$GIT_LM" create demo feature/b --base main > "$TMP_ROOT/success-missing-remote.out" 2>&1
 	assert_grep "remote:" "$TMP_ROOT/success-missing-remote.out"
+	local updated_sha
+	updated_sha=$(git rev-parse light-merge/demo)
+	assert_grep "local:.*${updated_sha:0:7}" "$TMP_ROOT/success-missing-remote.out"
+	assert_grep "remote:.*${initial_sha:0:7}" "$TMP_ROOT/success-missing-remote.out"
 	assert_grep "features: .*feature/a" "$TMP_ROOT/success-missing-remote.out"
 	assert_grep "missing on origin: feature/a" "$TMP_ROOT/success-missing-remote.out"
 	assert_line_order "remote:" "Warning: missing on origin: feature/a" "$TMP_ROOT/success-missing-remote.out"
@@ -283,6 +302,10 @@ test_status() {
 	assert_grep "missing on origin: feature/a" "$TMP_ROOT/pull-missing-remote.out"
 
 	"$GIT_LM" status demo > "$TMP_ROOT/status-inconsistent-missing-remote.out" 2>&1
+	assert_grep "Commit  : Local .*${updated_sha:0:7}" "$TMP_ROOT/status-inconsistent-missing-remote.out"
+	assert_grep "local:.*${updated_sha:0:7}" "$TMP_ROOT/status-inconsistent-missing-remote.out"
+	assert_grep "remote:.*${initial_sha:0:7}" "$TMP_ROOT/status-inconsistent-missing-remote.out"
+	assert_grep "remote:.*${colored_commit}" "$TMP_ROOT/status-inconsistent-missing-remote.out"
 	assert_line_order "local:" "remote:" "$TMP_ROOT/status-inconsistent-missing-remote.out"
 	assert_line_order "remote:" "Warning: missing on origin: feature/a" "$TMP_ROOT/status-inconsistent-missing-remote.out"
 	local purple_feature
@@ -290,6 +313,8 @@ test_status() {
 	assert_grep "$purple_feature" "$TMP_ROOT/status-inconsistent-missing-remote.out"
 
 	"$GIT_LM" list > "$TMP_ROOT/list-inconsistent-missing-remote.out" 2>&1
+	assert_grep "local:.*${updated_sha:0:7}" "$TMP_ROOT/list-inconsistent-missing-remote.out"
+	assert_grep "remote:.*${initial_sha:0:7}" "$TMP_ROOT/list-inconsistent-missing-remote.out"
 	assert_line_order "local:" "remote:" "$TMP_ROOT/list-inconsistent-missing-remote.out"
 	assert_line_order "remote:" "Warning: missing on origin: feature/a" "$TMP_ROOT/list-inconsistent-missing-remote.out"
 	assert_not_grep "light-merge/demo.*local:" "$TMP_ROOT/list-inconsistent-missing-remote.out"
@@ -299,6 +324,11 @@ test_status() {
 
 	git checkout -q main
 	git branch -D light-merge/demo >/dev/null 2>&1
+	"$GIT_LM" status demo > "$TMP_ROOT/status-remote-only.out" 2>&1
+	assert_grep "Commit  : Remote .*${initial_sha:0:7}" "$TMP_ROOT/status-remote-only.out"
+	assert_grep "Commit  : Remote ${colored_commit_info}" "$TMP_ROOT/status-remote-only.out"
+	"$GIT_LM" list > "$TMP_ROOT/list-remote-only.out" 2>&1
+	assert_grep "remote:.*${initial_sha:0:7}" "$TMP_ROOT/list-remote-only.out"
 	if "$GIT_LM" sync demo > "$TMP_ROOT/sync-missing-remote.out" 2>&1; then
 		fail "sync with missing remote feature unexpectedly succeeded"
 	fi

@@ -233,7 +233,8 @@ print_summary_state_line() {
 
     local info_formatted=""
     if [[ -n "$info" ]]; then
-        printf -v info_formatted "\e[90m%-35s\e[0m" "$info"
+        printf -v info_formatted "%-35s" "$info"
+        printf -v info_formatted "\e[33m%s\e[90m%s\e[0m" "${info_formatted:0:7}" "${info_formatted:7}"
     else
         printf -v info_formatted "%-35s" ""
     fi
@@ -270,7 +271,8 @@ format_state_line() {
     
     local info_formatted=""
     if [[ -n "$info" ]]; then
-        printf -v info_formatted "\e[90m%-35s\e[0m" "$info"
+        printf -v info_formatted "%-35s" "$info"
+        printf -v info_formatted "\e[33m%s\e[90m%s\e[0m" "${info_formatted:0:7}" "${info_formatted:7}"
     else
         printf -v info_formatted "%-35s" ""
     fi
@@ -611,7 +613,7 @@ print_lm_task_summary_lines() {
     fi
 
     if [[ $has_local -eq 1 && $has_remote -eq 1 && "$local_sha" == "$remote_sha" ]]; then
-        local info_str="${local_info:-$remote_info}"
+        local info_str="${local_sha:0:7} ${local_info:-$remote_info}"
         local synced_base="${local_base:-$remote_base}"
         local synced_features="${local_features:-$remote_features}"
         print_summary_state_line "$indent" "$leading" "synced" "$info_str" "$synced_base" "$synced_features"
@@ -637,12 +639,12 @@ print_lm_task_summary_lines() {
 
     local first_leading="$leading"
     if [[ $has_local -eq 1 ]]; then
-        print_summary_state_line "$indent" "$first_leading" "local" "$local_info" "$local_base" "$local_features" "$features_indent" "$local_difference_features"
+        print_summary_state_line "$indent" "$first_leading" "local" "${local_sha:0:7} $local_info" "$local_base" "$local_features" "$features_indent" "$local_difference_features"
         first_leading=""
     fi
 
     if [[ $has_remote -eq 1 ]]; then
-        print_summary_state_line "$indent" "$first_leading" "remote" "$remote_info" "$remote_base" "$remote_features" "$features_indent" "$remote_difference_features"
+        print_summary_state_line "$indent" "$first_leading" "remote" "${remote_sha:0:7} $remote_info" "$remote_base" "$remote_features" "$features_indent" "$remote_difference_features"
     fi
 
     warn_missing_origin_feature_sets "$indent" "$local_features" "$remote_features"
@@ -1086,7 +1088,7 @@ status_cmd() {
             printf "Base    : \e[1;36m%s\e[0m\n" "$local_base"
             print_features_line "$local_features"
             [[ ${#LM_PENDING[@]} -gt 0 ]] && log_warn "Pending : ${LM_PENDING[*]}"
-            [[ -n "$local_info" ]] && printf "Commit  : Local [\e[90m%s\e[0m]\n" "$local_info"
+            [[ -n "$local_info" ]] && printf "Commit  : Local \e[33m%s\e[0m [\e[90m%s\e[0m]\n" "${local_sha:0:7}" "$local_info"
             if [[ $has_remote -eq 0 ]]; then
                 warn_missing_origin_feature_sets "" "$local_features"
             fi
@@ -1098,7 +1100,7 @@ status_cmd() {
             printf "Branch  : \e[1;34morigin/%s\e[0m (remote-only)\n" "$name"
             printf "Base    : \e[1;36m%s\e[0m\n" "$remote_base"
             print_features_line "$remote_features"
-            [[ -n "$remote_info" ]] && printf "Commit  : Remote [\e[90m%s\e[0m]\n" "$remote_info"
+            [[ -n "$remote_info" ]] && printf "Commit  : Remote \e[33m%s\e[0m [\e[90m%s\e[0m]\n" "${remote_sha:0:7}" "$remote_info"
             warn_missing_origin_feature_sets "" "$remote_features"
         else
             log_err "Error: No remote state found for $full_name"
@@ -1120,8 +1122,8 @@ status_cmd() {
             local remote_difference_features=""
             get_feature_difference "$local_features" "$remote_features" local_difference_features
             get_feature_difference "$remote_features" "$local_features" remote_difference_features
-            format_state_line "          " "local" "$local_info" "$local_base" "$local_features" "$local_difference_features"
-            format_state_line "          " "remote" "$remote_info" "$remote_base" "$remote_features" "$remote_difference_features"
+            format_state_line "          " "local" "${local_sha:0:7} $local_info" "$local_base" "$local_features" "$local_difference_features"
+            format_state_line "          " "remote" "${remote_sha:0:7} $remote_info" "$remote_base" "$remote_features" "$remote_difference_features"
             warn_missing_origin_feature_sets "          " "$local_features" "$remote_features"
 
             if [[ "$local_time" -gt "$remote_time" ]]; then
